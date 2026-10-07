@@ -1,42 +1,65 @@
-# 🖥️ Context-Menu Resolution Switcher (右键菜单分辨率快速切换工具)
+# DisplaySwitcher — 桌面右键菜单分辨率/刷新率切换工具
 
-这是一个基于 `QRes` 搭配自定义脚本制作的 Windows 桌面便捷小工具。它允许你直接通过桌面右键菜单，一键快速切换屏幕的分辨率和刷新率。
+一个轻量化的 Windows 桌面工具，在桌面右键菜单一键切换指定显示器的分辨率与刷新率。专为需要在原生分辨率与自定义比例分辨率之间快速切换的 FPS 玩家设计。
 
-特别适合经常游玩 FPS 游戏（如 CS:GO、Valorant 等）需要频繁在日常原生分辨率和自定义比例分辨率（如 1568x1080 4:3 比例）之间切换的玩家，免去了每次都要繁琐地打开 NVIDIA 控制面板进行设置的麻烦。
+> 本项目为旧 QRes + BAT + VBS 方案的完全重写（v2.0.0），彻底放弃 QRes，改用 Windows 原生 API 实现。
 
-## ✨ 核心特性
+## 特性
 
-*   **⚡ 极速切换**：完美嵌入 Windows 11/10 桌面右键菜单，右键单击即可一键切换。
-*   **👻 隐蔽无感**：配合 VBS 脚本运行，彻底告别 CMD 黑框一闪而过，实现完美的静默切换体验。
-*   **⚙️ 高度自定义**：支持任意你已在显卡控制面板中添加的自定义分辨率及高刷新率（如 240Hz）。
+- **单一 EXE，仅 ~25 KB**：绿色便携，无需安装 .NET 运行时（Windows 10/11 原生支持）
+- **多显示器精准定位**：通过 `EnumDisplayDevices` + `ChangeDisplaySettingsEx` 指定设备名（`\\.\DISPLAY1` 等），杜绝多屏切换错乱；设备名失效时按友好名兜底匹配
+- **无后台驻留**：右键菜单项即调即走，执行完立即退出
+- **无黑框闪现**：纯 WinForms 程序，无任何终端窗口
+- **按需提权**：`asInvoker` 清单，仅切换动作触发 UAC；拒绝提权时自动降级直切
+- **切换安全**：先 `CDS_TEST` 验证模式再应用；测试切换带 15 秒倒计时自动还原
 
-## 📁 文件结构
+## 下载
 
-项目中包含以下核心文件：
+前往 [Releases](../../releases) 页面下载 `DisplaySwitcher-v2.0.0.zip`，解压即用。
 
-*   `QRes.exe`：开源的命令行屏幕分辨率更改工具，作为本项目的底层核心。
-*   `Run.vbs`：用于静默调用批处理脚本的 VBScript，确保执行切换时不弹出黑框。
-*   `单击版.bat`：执行具体分辨率切换逻辑或用于快速配置右键菜单的批处理文件。
+## 使用
 
-## 🚀 使用指南
+1. 双击 `DisplaySwitcher.exe` 打开配置界面
+2. 选择显示器、分辨率、刷新率，自定义菜单显示名称
+3. 点击【测试切换】验证效果（15 秒内可自动还原）
+4. 点击【确认并保存到右键菜单】
+5. 之后在桌面空白处右键即可一键切换
 
-1. **环境准备**：
-   确保你的显卡驱动面板（如 NVIDIA 控制面板）中，已经提前创建好了你想要切换的“自定义分辨率”（例如 `1568x1080`），且能够正常应用。
-2. **部署文件**：
-   将本仓库的所有文件下载并放置在一个固定的非中文、无空格路径下（例如图中示例的路径 `...\Tools\QRes`）。
-3. **配置菜单**：
-   运行相关脚本（如 `单击版.bat` 或配套的注册表 `.reg` 文件），将选项注册到系统的桌面右键菜单中。
-4. **一键切换**：
-   回到 Windows 桌面，在空白处点击右键，即可在菜单中看到类似如下的选项，点击即可瞬间完成切换：
-   * `切换到 1568x1080 @240Hz`
-   * `切换到 1920x1080 @240Hz`
+清理：配置界面点击【从右键菜单移除】可删除所有已注入的菜单项。
 
-## 🛠️ 进阶：如何修改分辨率参数
+## 命令行
 
-如果你需要修改为你自己的分辨率或刷新率，请打开对应的脚本文件并修改传递给 `QRes.exe` 的参数：
-*   `/x:` 对应屏幕宽度（例如 `/x:1568`）
-*   `/y:` 对应屏幕高度（例如 `/y:1080`）
-*   `/r:` 对应屏幕刷新率（例如 `/r:240` 代表 240Hz）
+```
+DisplaySwitcher.exe                              # 打开配置 GUI
+DisplaySwitcher.exe --list                       # 列出所有显示器及当前模式
+DisplaySwitcher.exe --switch "配置ID" --elevated  # 切换（右键菜单实际调用方式）
+DisplaySwitcher.exe --apply "\\.\DISPLAY1" 1920 1080 240
+```
 
-## 声明
-* 本项目核心的分辨率切换功能依赖于 [QRes](http://qres.sourceforge.net/)。
+## 自行编译
+
+无需 Visual Studio / dotnet SDK，使用 Windows 自带的 .NET Framework 编译器：
+
+```bat
+cd DisplaySwitcher
+build.bat
+```
+
+## 项目结构
+
+```
+DisplaySwitcher/
+├── DisplaySwitcher.exe   # 编译产物（单 EXE，~25 KB）
+├── Program.cs            # 入口、命令行解析、UAC 按需提权
+├── NativeMethods.cs      # P/Invoke：EnumDisplayDevices / ChangeDisplaySettingsEx / DEVMODE
+├── MainForm.cs           # 极简配置 GUI
+├── ConfigStore.cs        # config.json 读写（EXE 同目录）
+├── DisplayConfig.cs      # 配置模型
+├── RegistryManager.cs    # HKCU 桌面右键菜单注入/清理
+├── app.manifest          # asInvoker + DPI 感知
+└── build.bat             # csc.exe 一键编译脚本
+```
+
+## License
+
+MIT
