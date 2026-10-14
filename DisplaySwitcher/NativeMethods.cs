@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Text;
 
 namespace DisplaySwitcher
 {
@@ -32,6 +33,62 @@ namespace DisplaySwitcher
         public const int ENUM_CURRENT_SETTINGS = -1;
 
         public const uint ATTACH_PARENT_PROCESS = 0xFFFFFFFF;
+
+        // ---- cfgmgr32（常量已对照官方 cfgmgr32.h 核对）----
+        public const int CR_SUCCESS = 0x00000000;
+        public const int CR_ACCESS_DENIED = 0x00000033;
+        public const int CM_LOCATE_DEVNODE_NORMAL = 0x00000000;
+        public const int CM_DISABLE_UI_NOT_OK = 0x00000004;
+        public const int CM_DISABLE_PERSIST = 0x00000008; // 跨重启保持禁用
+        public const int CM_PROB_DISABLED = 22;           // Code 22：设备已禁用
+        public const int DN_HAS_PROBLEM = 0x00000400;
+
+        // ---- setupapi ----
+        public const uint DIGCF_PRESENT = 0x00000002;
+        public const uint SPDRP_DEVICEDESC = 0x00000000;
+        public const uint SPDRP_FRIENDLYNAME = 0x0000000C;
+
+        // GUID_DEVCLASS_MONITOR = {4d36e96e-e325-11ce-bfc1-08002be10318}
+        public static readonly Guid GUID_DEVCLASS_MONITOR =
+            new Guid(0x4d36e96e, 0xe325, 0x11ce, 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18);
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct SP_DEVINFO_DATA
+        {
+            public int cbSize;
+            public Guid ClassGuid;
+            public uint DevInst;
+            public IntPtr Reserved;
+        }
+
+        [DllImport("setupapi.dll", SetLastError = true)]
+        public static extern IntPtr SetupDiGetClassDevs(ref Guid ClassGuid, IntPtr Enumerator, IntPtr hwndParent, uint Flags);
+
+        [DllImport("setupapi.dll", SetLastError = true)]
+        public static extern bool SetupDiEnumDeviceInfo(IntPtr DeviceInfoSet, uint MemberIndex, ref SP_DEVINFO_DATA DeviceInfoData);
+
+        [DllImport("setupapi.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        public static extern bool SetupDiGetDeviceInstanceId(IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData,
+            StringBuilder DeviceInstanceId, int DeviceInstanceIdSize, out int RequiredSize);
+
+        [DllImport("setupapi.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        public static extern bool SetupDiGetDeviceRegistryProperty(IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData,
+            uint Property, out uint PropertyRegDataType, StringBuilder PropertyBuffer, uint PropertyBufferSize, out uint RequiredSize);
+
+        [DllImport("setupapi.dll", SetLastError = true)]
+        public static extern bool SetupDiDestroyDeviceInfoList(IntPtr DeviceInfoSet);
+
+        [DllImport("cfgmgr32.dll", CharSet = CharSet.Auto)]
+        public static extern int CM_Locate_DevNode(out uint pdnDevInst, string pDeviceID, int ulFlags);
+
+        [DllImport("cfgmgr32.dll")]
+        public static extern int CM_Disable_DevNode(uint dnDevInst, int ulFlags);
+
+        [DllImport("cfgmgr32.dll")]
+        public static extern int CM_Enable_DevNode(uint dnDevInst, int ulFlags);
+
+        [DllImport("cfgmgr32.dll")]
+        public static extern int CM_Get_DevNode_Status(out int pulStatus, out int pulProblemNumber, uint dnDevInst, int ulFlags);
 
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
         public struct DISPLAY_DEVICE
@@ -107,6 +164,7 @@ namespace DisplaySwitcher
         public string DeviceName;      // \\.\DISPLAY1
         public string AdapterString;   // 显卡名称
         public string MonitorName;     // 显示器友好名
+        public string MonitorInstanceId; // 监视器设备实例 ID（形如 MONITOR\AOC2702\4&xxxx）
         public int CurrentWidth;
         public int CurrentHeight;
         public int CurrentFrequency;
@@ -139,7 +197,10 @@ namespace DisplaySwitcher
                 NativeMethods.DISPLAY_DEVICE mon = new NativeMethods.DISPLAY_DEVICE();
                 mon.cb = Marshal.SizeOf(typeof(NativeMethods.DISPLAY_DEVICE));
                 if (NativeMethods.EnumDisplayDevices(dd.DeviceName, 0, ref mon, 0))
+                {
                     info.MonitorName = mon.DeviceString;
+                    info.MonitorInstanceId = mon.DeviceID;
+                }
 
                 NativeMethods.DEVMODE cur = new NativeMethods.DEVMODE();
                 cur.dmSize = (short)Marshal.SizeOf(typeof(NativeMethods.DEVMODE));
@@ -198,6 +259,19 @@ namespace DisplaySwitcher
                     return list[i].DeviceName;
             }
             return null;
+        }
+
+        // 仅测试模式是否被驱动接受（不应用）
+        public static int TestMode(string deviceName, int width, int height, int frequency)
+        {
+            NativeMethods.DEVMODE dm = new NativeMethods.DEVMODE();
+            dm.dmSize = (short)Marshal.SizeOf(typeof(NativeMethods.DEVMODE));
+            dm.dmPelsWidth = width;
+            dm.dmPelsHeight = height;
+            dm.dmDisplayFrequency = frequency;
+            dm.dmFields = NativeMethods.DM_PELSWIDTH | NativeMethods.DM_PELSHEIGHT | NativeMethods.DM_DISPLAYFREQUENCY;
+            return NativeMethods.ChangeDisplaySettingsEx(deviceName, ref dm, IntPtr.Zero,
+                NativeMethods.CDS_FULLSCREEN | NativeMethods.CDS_TEST, IntPtr.Zero);
         }
 
         // 先用 CDS_TEST 验证模式合法，再用 CDS_UPDATEREGISTRY 真正应用

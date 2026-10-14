@@ -6,7 +6,8 @@ using System.Windows.Forms;
 
 namespace DisplaySwitcher
 {
-    // config.json 读写，文件固定放在 EXE 同目录
+    // config.json 读写，文件固定放在 EXE 同目录。
+    // 兼容：读取时自动识别旧格式（扁平数组）并转换为新格式；写入统一用新格式。
     public static class ConfigStore
     {
         public static string ConfigPath
@@ -17,34 +18,78 @@ namespace DisplaySwitcher
             }
         }
 
-        public static List<DisplayConfig> Load()
+        // 归一化读取整个配置根：旧扁平数组自动转为新格式，缺失字段补默认值
+        private static ConfigRoot LoadRoot()
         {
-            if (!File.Exists(ConfigPath)) return new List<DisplayConfig>();
+            ConfigRoot root = new ConfigRoot();
+            if (!File.Exists(ConfigPath)) return root;
             string json = File.ReadAllText(ConfigPath);
-            if (string.IsNullOrEmpty(json) || json.Trim().Length == 0) return new List<DisplayConfig>();
+            if (string.IsNullOrEmpty(json) || json.Trim().Length == 0) return root;
+
             JavaScriptSerializer ser = new JavaScriptSerializer();
-            List<DisplayConfig> list = ser.Deserialize<List<DisplayConfig>>(json);
-            return list ?? new List<DisplayConfig>();
+            json = json.Trim();
+            if (json.StartsWith("["))
+            {
+                // 旧格式：扁平数组
+                List<LegacyDisplayConfig> legacy = ser.Deserialize<List<LegacyDisplayConfig>>(json);
+                if (legacy != null)
+                    for (int i = 0; i < legacy.Count; i++)
+                        if (legacy[i] != null) root.profiles.Add(legacy[i].ToProfile());
+                return root;
+            }
+
+            ConfigRoot parsed = ser.Deserialize<ConfigRoot>(json);
+            if (parsed == null) return root;
+            if (parsed.profiles != null) root.profiles = parsed.profiles;
+            if (parsed.disabledMonitors != null) root.disabledMonitors = parsed.disabledMonitors;
+            if (parsed.nvidiaSettings != null) root.nvidiaSettings = parsed.nvidiaSettings;
+            return root;
         }
 
-        public static void Save(List<DisplayConfig> list)
+        private static void SaveRoot(ConfigRoot root)
         {
+            if (root.disabledMonitors == null) root.disabledMonitors = new List<string>();
             JavaScriptSerializer ser = new JavaScriptSerializer();
-            File.WriteAllText(ConfigPath, ser.Serialize(list));
+            File.WriteAllText(ConfigPath, ser.Serialize(root));
         }
 
-        public static DisplayConfig FindById(string id)
+        public static List<DisplayProfile> LoadProfiles()
         {
-            List<DisplayConfig> all = Load();
+            return LoadRoot().profiles;
+        }
+
+        public static void SaveProfiles(List<DisplayProfile> profiles)
+        {
+            ConfigRoot root = LoadRoot();
+            root.profiles = profiles ?? new List<DisplayProfile>();
+            SaveRoot(root);
+        }
+
+        public static NvidiaSettings LoadNvidiaSettings()
+        {
+            ConfigRoot root = LoadRoot();
+            return root.nvidiaSettings ?? new NvidiaSettings();
+        }
+
+        public static void SaveNvidiaSettings(NvidiaSettings settings)
+        {
+            ConfigRoot root = LoadRoot();
+            root.nvidiaSettings = settings;
+            SaveRoot(root);
+        }
+
+        public static DisplayProfile FindById(string id)
+        {
+            List<DisplayProfile> all = LoadProfiles();
             for (int i = 0; i < all.Count; i++)
-                if (string.Equals(all[i].Id, id, StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(all[i].id, id, StringComparison.OrdinalIgnoreCase))
                     return all[i];
             return null;
         }
 
         public static void Clear()
         {
-            Save(new List<DisplayConfig>());
+            SaveProfiles(new List<DisplayProfile>());
         }
     }
 }
