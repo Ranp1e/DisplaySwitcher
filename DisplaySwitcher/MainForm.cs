@@ -9,7 +9,7 @@ namespace DisplaySwitcher
 {
     public class MainForm : Form
     {
-        public const string Version = "v2.1.0";
+        public const string Version = "v2.6.0";
 
         // 显示器信息卡片
         private Label lblCurrentMode;
@@ -20,23 +20,31 @@ namespace DisplaySwitcher
         private TextBox txtWidth;
         private TextBox txtHeight;
         private TextBox txtRefresh;
-        private Button btnAddToList;
+        private Button btnCreateDriver;
 
         // 监视器开关卡片
         private ComboBox cmbMonitors;
         private CheckBox chkMonitorToggle;
 
-        // NVIDIA 显示增强卡片
+        // 显示增强卡片（NVIDIA / AMD 双面板可切换）
+        private Button btnVendorNv;
+        private Button btnVendorAmd;
+        private Label lblScalingMode;
         private ComboBox cmbScaling;
+        private Label lblVibrance;
         private TrackBar trkVibrance;
         private Label lblVibranceVal;
-        private Button btnApplyNvidia;
-        private Label lblNvHint;
+        private Button btnApplyEnhance;
+        private Label lblEnhHint;
+        private int currentVendor;      // 0=NVIDIA 1=AMD
+        private bool vendorTouched;     // 用户手动切换过厂商后不再自动跟随
 
         // 左右分栏配置区
         private ComboBox cmbFreqFilter;
         private ListBox lstAvailable;
         private Button btnAddSelected;
+        private Button btnTestSwitch;
+        private Button btnDeleteCustom;
         private ListBox lstAdded;
         private Button btnRemoveSelected;
         private Button btnRemoveAll;
@@ -44,49 +52,113 @@ namespace DisplaySwitcher
         // 状态栏
         private Label lblStatus;
 
-        private List<ModeEntry> nativeEntries;   // 当前显示器原生支持的模式
-        private List<ModeEntry> customEntries;   // 会话内手动添加的自定义模式
+        private List<ModeEntry> nativeEntries;   // 当前显示器驱动枚举的模式（含驱动级自定义）
         private List<MonitorDevice> monitors;
         private bool suppress;
 
-        private static readonly Color ColorPrimary = Color.FromArgb(0, 120, 215);
-        private static readonly Color ColorGreen = Color.FromArgb(16, 124, 16);
-        private static readonly Color ColorGrey = Color.FromArgb(150, 150, 150);
-        private static readonly Color ColorDanger = Color.FromArgb(196, 43, 28);
+        // iOS 风格调色板
+        private static readonly Color ColorPrimary = Color.FromArgb(0, 122, 255);    // 系统蓝
+        private static readonly Color ColorGreen = Color.FromArgb(52, 199, 89);      // 系统绿
+        private static readonly Color ColorGrey = Color.FromArgb(142, 142, 147);     // 辅助灰
+        private static readonly Color ColorGrayBg = Color.FromArgb(229, 229, 234);   // 次要按钮底
+        private static readonly Color ColorDarkText = Color.FromArgb(28, 28, 30);
+        private static readonly Color ColorCardBg = Color.White;
+        private static readonly Color ColorFormBg = Color.FromArgb(242, 242, 247);   // systemGray6
 
         public MainForm()
         {
             Text = "DisplaySwitcher " + Version;
             StartPosition = FormStartPosition.CenterScreen;
-            ClientSize = new Size(600, 648);
-            FormBorderStyle = FormBorderStyle.FixedSingle;
-            MaximizeBox = false;
-            BackColor = Color.White;
             Font = new Font("Microsoft YaHei UI", 9f);
+            // 高 DPI（4K 等）按系统缩放比例放大；布局容器保证不遮挡
+            AutoScaleMode = AutoScaleMode.Dpi;
+            ClientSize = new Size(620, 700);
+            FormBorderStyle = FormBorderStyle.Sizable;
+            MaximizeBox = true;
+            MinimumSize = new Size(520, 600);
+            BackColor = ColorFormBg;
 
-            customEntries = new List<ModeEntry>();
             nativeEntries = new List<ModeEntry>();
 
-            BuildDisplaySection();
-            BuildCustomResSection();
-            BuildMonitorSection();
-            BuildNvidiaSection();
-            BuildShortcutSection();
-            BuildStatusBar();
+            // 布局：状态栏贴底，顶部四张卡片纵向贴顶，快捷方式卡片占满中间剩余空间
+            // （不用 TableLayoutPanel 的 Percent 行——AutoScroll 下会被压扁）
+            Panel fillHost = new Panel();
+            fillHost.Dock = DockStyle.Fill;
+            fillHost.BackColor = ColorFormBg;
+            fillHost.Padding = new Padding(10, 0, 10, 6);
+            Controls.Add(fillHost);
+
+            // 顶部四张卡片用普通 Panel + Dock=Top 堆叠（后添加的停靠在上，故逆序构建）
+            Panel topPanel = new Panel();
+            topPanel.Dock = DockStyle.Top;
+            topPanel.AutoSize = true;
+            topPanel.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            topPanel.BackColor = ColorFormBg;
+            topPanel.Padding = new Padding(10, 10, 10, 0);
+            Controls.Add(topPanel);
+
+            BuildEnhanceSection(topPanel);
+            BuildMonitorSection(topPanel);
+            BuildCustomResSection(topPanel);
+            BuildDisplaySection(topPanel);
+            BuildShortcutSection(fillHost);
+            BuildStatusBar(this);
 
             Load += MainForm_Load;
         }
 
-        // ---------- 界面构建 ----------
+        // ---------- 界面构建（iOS 风格卡片 + 布局容器） ----------
 
-        private GroupBox MakeGroup(string text, int x, int y, int w, int h)
+        // iOS 风格卡片：白底无边框 Panel + 灰色小标题。fill=true 时卡片占满剩余空间
+        private TableLayoutPanel MakeCard(Control parent, string title, bool fill)
         {
-            GroupBox g = new GroupBox();
-            g.Text = text;
-            g.SetBounds(x, y, w, h);
-            g.BackColor = Color.White;
-            Controls.Add(g);
-            return g;
+            Panel card = new Panel();
+            card.BackColor = ColorCardBg;
+            card.Margin = new Padding(2, 2, 2, 10);
+            card.Padding = new Padding(14, 10, 14, 12);
+            if (!fill)
+            {
+                // 普通 Panel 里 Dock=Top 纵向堆叠，自动占满宽度（比 FlowLayoutPanel 可靠）
+                card.Dock = DockStyle.Top;
+                card.AutoSize = true;
+                card.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            }
+            else
+            {
+                card.Dock = DockStyle.Fill;
+            }
+
+            TableLayoutPanel body = new TableLayoutPanel();
+            body.Dock = fill ? DockStyle.Fill : DockStyle.Top;
+            body.Margin = new Padding(0);
+            if (!fill)
+            {
+                body.AutoSize = true;
+                body.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            }
+            card.Controls.Add(body);
+
+            Label t = new Label();
+            t.Text = title;
+            t.Font = new Font("Microsoft YaHei UI", 9f, FontStyle.Bold);
+            t.ForeColor = ColorGrey;
+            t.AutoSize = true;
+            t.Dock = DockStyle.Top;
+            t.Margin = new Padding(0, 0, 0, 8);
+            card.Controls.Add(t);
+
+            parent.Controls.Add(card);
+            return body;
+        }
+
+        private static Button MakeButton(string text, Color back, Color fore, int w, int h)
+        {
+            Button b = new Button();
+            b.Text = text;
+            StyleButton(b, back, fore);
+            b.Size = new Size(w, h);
+            b.Margin = new Padding(4, 2, 4, 2);
+            return b;
         }
 
         private static void StyleButton(Button b, Color back, Color fore)
@@ -98,209 +170,401 @@ namespace DisplaySwitcher
             b.Cursor = Cursors.Hand;
         }
 
-        private static Label MakeLabel(Control parent, string text, int x, int y, int w)
+        // 流式布局用的自适应文字标签（垂直居中对齐控件）
+        private static Label MakeFlowLabel(Control parent, string text)
         {
             Label l = new Label();
             l.Text = text;
-            l.SetBounds(x, y, w, 20);
+            l.AutoSize = true;
+            l.Margin = new Padding(4, 7, 2, 2);
+            l.ForeColor = ColorDarkText;
             parent.Controls.Add(l);
             return l;
         }
 
-        private void BuildDisplaySection()
+        // 卡片内的灰色小字提示
+        private Label MakeHintLabel(Control parent, string text)
         {
-            GroupBox g = MakeGroup("显示器信息", 12, 8, 576, 96);
+            Label l = new Label();
+            l.Text = text;
+            l.AutoSize = true;
+            l.Dock = DockStyle.Top;
+            l.ForeColor = ColorGrey;
+            l.Font = new Font("Microsoft YaHei UI", 8f);
+            l.Margin = new Padding(0, 6, 0, 0);
+            parent.Controls.Add(l);
+            return l;
+        }
+
+        private void BuildDisplaySection(Control parent)
+        {
+            TableLayoutPanel body = MakeCard(parent, "显示器信息", false);
+            body.ColumnCount = 2;
+            body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            body.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 190f));
+            body.RowStyles.Add(new RowStyle(SizeType.Absolute, 56f));
 
             lblCurrentMode = new Label();
-            lblCurrentMode.SetBounds(16, 26, 390, 52);
-            lblCurrentMode.Font = new Font("Microsoft YaHei UI", 20f, FontStyle.Bold);
-            lblCurrentMode.ForeColor = Color.FromArgb(40, 40, 40);
+            lblCurrentMode.Dock = DockStyle.Fill;
+            lblCurrentMode.Font = new Font("Microsoft YaHei UI", 18f, FontStyle.Bold);
+            lblCurrentMode.ForeColor = ColorDarkText;
+            lblCurrentMode.TextAlign = ContentAlignment.MiddleLeft;
+            lblCurrentMode.AutoEllipsis = true;
             lblCurrentMode.Text = "-";
-            g.Controls.Add(lblCurrentMode);
+            body.Controls.Add(lblCurrentMode, 0, 0);
 
-            btnRefresh = new Button();
-            btnRefresh.Text = "刷新检测";
-            btnRefresh.SetBounds(424, 24, 96, 26);
-            StyleButton(btnRefresh, Color.FromArgb(240, 240, 240), Color.FromArgb(50, 50, 50));
+            FlowLayoutPanel right = new FlowLayoutPanel();
+            right.FlowDirection = FlowDirection.TopDown;
+            right.Dock = DockStyle.Fill;
+            right.Margin = new Padding(0);
+            right.WrapContents = false;
+            body.Controls.Add(right, 1, 0);
+
+            btnRefresh = MakeButton("刷新检测", ColorGrayBg, ColorDarkText, 178, 28);
             btnRefresh.Click += btnRefresh_Click;
-            g.Controls.Add(btnRefresh);
+            right.Controls.Add(btnRefresh);
 
             cmbDevice = new ComboBox();
             cmbDevice.DropDownStyle = ComboBoxStyle.DropDownList;
-            cmbDevice.SetBounds(424, 58, 136, 23);
+            cmbDevice.Width = 178;
+            cmbDevice.Margin = new Padding(4, 6, 4, 2);
             cmbDevice.SelectedIndexChanged += cmbDevice_SelectedIndexChanged;
-            g.Controls.Add(cmbDevice);
+            right.Controls.Add(cmbDevice);
         }
 
-        private void BuildCustomResSection()
+        private void BuildCustomResSection(Control parent)
         {
-            GroupBox g = MakeGroup("自定义分辨率", 12, 112, 576, 60);
+            TableLayoutPanel body = MakeCard(parent, "自定义分辨率", false);
+            body.ColumnCount = 2;
+            body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            body.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 240f));
 
-            MakeLabel(g, "宽", 16, 26, 18);
-            txtWidth = new TextBox();
-            txtWidth.SetBounds(36, 23, 64, 23);
-            txtWidth.Text = "1920";
-            g.Controls.Add(txtWidth);
+            FlowLayoutPanel inputs = new FlowLayoutPanel();
+            inputs.FlowDirection = FlowDirection.LeftToRight;
+            inputs.AutoSize = true;
+            inputs.Dock = DockStyle.Top;
+            inputs.Margin = new Padding(0);
+            inputs.WrapContents = false;
+            body.Controls.Add(inputs, 0, 0);
 
-            MakeLabel(g, "×", 104, 26, 14);
+            MakeFlowLabel(inputs, "宽");
+            txtWidth = MakeInput(inputs, "1920", 56);
+            MakeFlowLabel(inputs, "×");
+            MakeFlowLabel(inputs, "高");
+            txtHeight = MakeInput(inputs, "1080", 56);
+            MakeFlowLabel(inputs, "@");
+            txtRefresh = MakeInput(inputs, "240", 48);
+            MakeFlowLabel(inputs, "Hz");
 
-            MakeLabel(g, "高", 122, 26, 18);
-            txtHeight = new TextBox();
-            txtHeight.SetBounds(142, 23, 64, 23);
-            txtHeight.Text = "1080";
-            g.Controls.Add(txtHeight);
-
-            MakeLabel(g, "@", 210, 26, 16);
-
-            txtRefresh = new TextBox();
-            txtRefresh.SetBounds(230, 23, 56, 23);
-            txtRefresh.Text = "240";
-            g.Controls.Add(txtRefresh);
-
-            MakeLabel(g, "Hz", 290, 26, 26);
-
-            btnAddToList = new Button();
-            btnAddToList.Text = "＋ 添加到列表";
-            btnAddToList.SetBounds(430, 21, 130, 28);
-            StyleButton(btnAddToList, ColorPrimary, Color.White);
-            btnAddToList.Click += btnAddToList_Click;
-            g.Controls.Add(btnAddToList);
+            btnCreateDriver = MakeButton("⚡ 创建到驱动", ColorGreen, Color.White, 232, 30);
+            btnCreateDriver.Anchor = AnchorStyles.Right;
+            btnCreateDriver.Click += btnCreateDriver_Click;
+            body.Controls.Add(btnCreateDriver, 1, 0);
         }
 
-        private void BuildMonitorSection()
+        private static TextBox MakeInput(Control parent, string text, int w)
         {
-            GroupBox g = MakeGroup("监视器开关", 12, 180, 576, 76);
+            TextBox t = new TextBox();
+            t.Text = text;
+            t.Width = w;
+            t.TextAlign = HorizontalAlignment.Center;
+            t.Margin = new Padding(2, 4, 2, 2);
+            parent.Controls.Add(t);
+            return t;
+        }
+
+        private void BuildMonitorSection(Control parent)
+        {
+            TableLayoutPanel body = MakeCard(parent, "监视器开关", false);
+            body.ColumnCount = 2;
+            body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            body.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 100f));
 
             cmbMonitors = new ComboBox();
             cmbMonitors.DropDownStyle = ComboBoxStyle.DropDownList;
-            cmbMonitors.SetBounds(16, 24, 320, 23);
+            cmbMonitors.Dock = DockStyle.Fill;
+            cmbMonitors.Margin = new Padding(0, 4, 4, 2);
             cmbMonitors.SelectedIndexChanged += cmbMonitors_SelectedIndexChanged;
-            g.Controls.Add(cmbMonitors);
+            body.Controls.Add(cmbMonitors, 0, 0);
 
             chkMonitorToggle = new CheckBox();
             chkMonitorToggle.Appearance = Appearance.Button;
             chkMonitorToggle.FlatStyle = FlatStyle.Flat;
             chkMonitorToggle.FlatAppearance.BorderSize = 0;
             chkMonitorToggle.TextAlign = ContentAlignment.MiddleCenter;
-            chkMonitorToggle.SetBounds(476, 22, 84, 26);
+            chkMonitorToggle.Size = new Size(88, 28);
+            chkMonitorToggle.Anchor = AnchorStyles.Right;
             chkMonitorToggle.ForeColor = Color.White;
             chkMonitorToggle.Click += chkMonitorToggle_Click;
-            g.Controls.Add(chkMonitorToggle);
+            body.Controls.Add(chkMonitorToggle, 1, 0);
 
-            Label hint = MakeLabel(g, "禁用/启用需管理员授权，禁用后屏幕会短暂黑屏，窗口会移动到主屏", 16, 52, 544);
-            hint.ForeColor = Color.Gray;
-            hint.Font = new Font("Microsoft YaHei UI", 8f);
+            Label hint = MakeHintLabel(body, "禁用/启用需管理员授权，禁用后屏幕会短暂黑屏，窗口会移动到主屏");
+            body.SetColumnSpan(hint, 2);
         }
 
-        private void BuildNvidiaSection()
+        private void BuildEnhanceSection(Control parent)
         {
-            GroupBox g = MakeGroup("NVIDIA 显示增强", 12, 264, 576, 126);
+            TableLayoutPanel body = MakeCard(parent, "显示增强", false);
+            body.ColumnCount = 2;
+            body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            body.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 172f));
 
-            MakeLabel(g, "缩放模式：", 16, 28, 70);
+            // 左上角厂商切换器（分段按钮），切换下方控件面板
+            FlowLayoutPanel seg = new FlowLayoutPanel();
+            seg.FlowDirection = FlowDirection.LeftToRight;
+            seg.AutoSize = true;
+            seg.Margin = new Padding(0, 0, 0, 4);
+            body.Controls.Add(seg, 0, 0);
+            body.SetColumnSpan(seg, 2);
+
+            btnVendorNv = MakeButton("NVIDIA", ColorPrimary, Color.White, 84, 26);
+            btnVendorNv.Click += btnVendorNv_Click;
+            seg.Controls.Add(btnVendorNv);
+
+            btnVendorAmd = MakeButton("AMD", ColorGrayBg, ColorDarkText, 84, 26);
+            btnVendorAmd.Click += btnVendorAmd_Click;
+            seg.Controls.Add(btnVendorAmd);
+
+            // 缩放模式行
+            FlowLayoutPanel scalingRow = new FlowLayoutPanel();
+            scalingRow.FlowDirection = FlowDirection.LeftToRight;
+            scalingRow.AutoSize = true;
+            scalingRow.Dock = DockStyle.Fill;
+            scalingRow.Margin = new Padding(0);
+            body.Controls.Add(scalingRow, 0, 1);
+
+            lblScalingMode = MakeFlowLabel(scalingRow, "缩放模式：");
             cmbScaling = new ComboBox();
             cmbScaling.DropDownStyle = ComboBoxStyle.DropDownList;
-            cmbScaling.SetBounds(90, 25, 210, 23);
-            // 固定两项，执行缩放的一方均为显示器（Balanced = 显示缩放）
-            cmbScaling.Items.Add(new ScalingOption("纵横比", NvApi.SCALING_DISPLAY_ASPECT));
-            cmbScaling.Items.Add(new ScalingOption("全屏", NvApi.SCALING_DISPLAY_FULLSCREEN));
+            cmbScaling.Width = 140;
+            cmbScaling.Margin = new Padding(4, 4, 2, 2);
+            // 逻辑码两厂商通用：纵横比=6 / 全屏=1（NVIDIA 用显示器缩放，AMD 用 GPU 缩放+保持纵横比组合）
+            cmbScaling.Items.Add(new ScalingOption("纵横比", AmdApi.SCALING_ASPECT));
+            cmbScaling.Items.Add(new ScalingOption("全屏", AmdApi.SCALING_FULLSCREEN));
             cmbScaling.SelectedIndex = 0;
-            g.Controls.Add(cmbScaling);
+            scalingRow.Controls.Add(cmbScaling);
 
-            btnApplyNvidia = new Button();
-            btnApplyNvidia.Text = "应用 NVIDIA 设置";
-            btnApplyNvidia.SetBounds(420, 23, 140, 28);
-            StyleButton(btnApplyNvidia, ColorPrimary, Color.White);
-            btnApplyNvidia.Click += btnApplyNvidia_Click;
-            g.Controls.Add(btnApplyNvidia);
+            btnApplyEnhance = MakeButton("应用 NVIDIA 设置", ColorPrimary, Color.White, 162, 30);
+            btnApplyEnhance.Anchor = AnchorStyles.Right;
+            btnApplyEnhance.Click += btnApplyEnhance_Click;
+            body.Controls.Add(btnApplyEnhance, 1, 1);
 
-            MakeLabel(g, "数字振动：", 16, 66, 70);
+            // 数字振动/饱和度行：标签 + 滑块（自适应宽度）+ 数值
+            TableLayoutPanel sliderRow = new TableLayoutPanel();
+            sliderRow.Dock = DockStyle.Top;
+            sliderRow.AutoSize = true;
+            sliderRow.ColumnCount = 3;
+            sliderRow.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            sliderRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            sliderRow.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 44f));
+            sliderRow.Margin = new Padding(0, 4, 0, 0);
+            body.Controls.Add(sliderRow, 0, 2);
+            body.SetColumnSpan(sliderRow, 2);
+
+            lblVibrance = new Label();
+            lblVibrance.Text = "数字振动：";
+            lblVibrance.AutoSize = true;
+            lblVibrance.ForeColor = ColorDarkText;
+            lblVibrance.Margin = new Padding(4, 8, 2, 2);
+            sliderRow.Controls.Add(lblVibrance, 0, 0);
+
             trkVibrance = new TrackBar();
             trkVibrance.AutoSize = false;
-            trkVibrance.SetBounds(86, 60, 272, 28);
+            trkVibrance.Height = 28;
+            trkVibrance.Dock = DockStyle.Fill;
             trkVibrance.TickStyle = TickStyle.None;
             trkVibrance.Minimum = 0;
             trkVibrance.Maximum = 100;
             trkVibrance.Value = 50;
             trkVibrance.Scroll += trkVibrance_Scroll;
-            g.Controls.Add(trkVibrance);
+            sliderRow.Controls.Add(trkVibrance, 1, 0);
 
-            lblVibranceVal = MakeLabel(g, "50", 364, 66, 36);
-            lblVibranceVal.ForeColor = Color.FromArgb(40, 40, 40);
+            lblVibranceVal = new Label();
+            lblVibranceVal.Text = "50";
+            lblVibranceVal.AutoSize = true;
+            lblVibranceVal.ForeColor = ColorDarkText;
+            lblVibranceVal.Margin = new Padding(6, 8, 0, 2);
+            sliderRow.Controls.Add(lblVibranceVal, 2, 0);
 
-            lblNvHint = MakeLabel(g, "设置即时生效，仅作用于当前选中的显示器；直调失败时才会请求管理员授权", 16, 102, 544);
-            lblNvHint.ForeColor = Color.Gray;
-            lblNvHint.Font = new Font("Microsoft YaHei UI", 8f);
+            lblEnhHint = MakeHintLabel(body, "设置即时生效，仅作用于当前选中的显示器；直调失败时才会请求管理员授权");
+            body.SetColumnSpan(lblEnhHint, 2);
         }
 
-        private void BuildShortcutSection()
+        private void StyleVendorButton(Button btn, bool active, bool available)
         {
-            GroupBox g = MakeGroup("桌面右键快捷方式", 12, 398, 576, 212);
+            btn.Enabled = available;
+            if (active)
+                StyleButton(btn, ColorPrimary, Color.White);
+            else
+                StyleButton(btn, ColorGrayBg, ColorDarkText);
+        }
 
-            MakeLabel(g, "可选分辨率", 12, 21, 90);
+        private void BuildShortcutSection(Control parent)
+        {
+            TableLayoutPanel body = MakeCard(parent, "桌面右键快捷方式", true);
+            body.ColumnCount = 2;
+            body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
+            body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50f));
+
+            // 左列：可选分辨率
+            TableLayoutPanel left = new TableLayoutPanel();
+            left.Dock = DockStyle.Fill;
+            left.Margin = new Padding(0, 0, 6, 0);
+            left.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            left.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+            left.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            left.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            body.Controls.Add(left, 0, 0);
+
+            FlowLayoutPanel headLeft = new FlowLayoutPanel();
+            headLeft.FlowDirection = FlowDirection.LeftToRight;
+            headLeft.AutoSize = true;
+            headLeft.Margin = new Padding(0);
+            left.Controls.Add(headLeft, 0, 0);
+            MakeFlowLabel(headLeft, "可选分辨率");
             cmbFreqFilter = new ComboBox();
             cmbFreqFilter.DropDownStyle = ComboBoxStyle.DropDownList;
-            cmbFreqFilter.SetBounds(104, 18, 112, 23);
+            cmbFreqFilter.Width = 96;
+            cmbFreqFilter.Margin = new Padding(6, 4, 2, 2);
             cmbFreqFilter.Items.Add("全部刷新率");
             cmbFreqFilter.SelectedIndex = 0;
             cmbFreqFilter.SelectedIndexChanged += cmbFreqFilter_SelectedIndexChanged;
-            g.Controls.Add(cmbFreqFilter);
+            headLeft.Controls.Add(cmbFreqFilter);
 
             lstAvailable = new ListBox();
-            lstAvailable.SetBounds(12, 44, 274, 120);
+            lstAvailable.Dock = DockStyle.Fill;
+            lstAvailable.Margin = new Padding(0, 6, 0, 6);
+            lstAvailable.BorderStyle = BorderStyle.FixedSingle;
             lstAvailable.SelectionMode = SelectionMode.MultiExtended;
-            g.Controls.Add(lstAvailable);
+            lstAvailable.SelectedIndexChanged += lstAvailable_SelectedIndexChanged;
+            lstAvailable.DoubleClick += lstAvailable_DoubleClick;
+            left.Controls.Add(lstAvailable, 0, 1);
 
-            btnAddSelected = new Button();
-            btnAddSelected.Text = "→ 添加选中项";
-            btnAddSelected.SetBounds(12, 170, 134, 30);
-            StyleButton(btnAddSelected, ColorPrimary, Color.White);
+            FlowLayoutPanel btnRowLeft = new FlowLayoutPanel();
+            btnRowLeft.FlowDirection = FlowDirection.LeftToRight;
+            btnRowLeft.AutoSize = true;
+            btnRowLeft.Margin = new Padding(0);
+            left.Controls.Add(btnRowLeft, 0, 2);
+
+            btnAddSelected = MakeButton("→ 添加选中项", ColorPrimary, Color.White, 128, 30);
             btnAddSelected.Click += btnAddSelected_Click;
-            g.Controls.Add(btnAddSelected);
+            btnRowLeft.Controls.Add(btnAddSelected);
+            btnTestSwitch = MakeButton("⚡ 测试切换", ColorGreen, Color.White, 110, 30);
+            btnTestSwitch.Click += btnTestSwitch_Click;
+            btnRowLeft.Controls.Add(btnTestSwitch);
 
-            MakeLabel(g, "已添加（当前显示器）", 302, 21, 180);
+            btnDeleteCustom = MakeButton("✕ 删除自定义（驱动）", ColorGrayBg, ColorDarkText, 246, 30);
+            btnDeleteCustom.Margin = new Padding(0, 4, 0, 0);
+            btnDeleteCustom.Click += btnDeleteCustom_Click;
+            left.Controls.Add(btnDeleteCustom, 0, 3);
+
+            // 右列：已添加
+            TableLayoutPanel right = new TableLayoutPanel();
+            right.Dock = DockStyle.Fill;
+            right.Margin = new Padding(6, 0, 0, 0);
+            right.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            right.RowStyles.Add(new RowStyle(SizeType.Percent, 100f));
+            right.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+            body.Controls.Add(right, 1, 0);
+
+            Label lblAdded = new Label();
+            lblAdded.Text = "已添加（当前显示器）";
+            lblAdded.AutoSize = true;
+            lblAdded.ForeColor = ColorDarkText;
+            lblAdded.Margin = new Padding(4, 7, 2, 2);
+            right.Controls.Add(lblAdded, 0, 0);
 
             lstAdded = new ListBox();
-            lstAdded.SetBounds(302, 44, 274, 120);
+            lstAdded.Dock = DockStyle.Fill;
+            lstAdded.Margin = new Padding(0, 6, 0, 6);
+            lstAdded.BorderStyle = BorderStyle.FixedSingle;
             lstAdded.SelectionMode = SelectionMode.MultiExtended;
-            g.Controls.Add(lstAdded);
+            lstAdded.SelectedIndexChanged += lstAdded_SelectedIndexChanged;
+            lstAdded.DoubleClick += lstAdded_DoubleClick;
+            right.Controls.Add(lstAdded, 0, 1);
 
-            btnRemoveSelected = new Button();
-            btnRemoveSelected.Text = "← 移除选中项";
-            btnRemoveSelected.SetBounds(302, 170, 134, 30);
-            StyleButton(btnRemoveSelected, Color.FromArgb(240, 240, 240), Color.FromArgb(50, 50, 50));
+            FlowLayoutPanel btnRowRight = new FlowLayoutPanel();
+            btnRowRight.FlowDirection = FlowDirection.LeftToRight;
+            btnRowRight.AutoSize = true;
+            btnRowRight.Margin = new Padding(0);
+            right.Controls.Add(btnRowRight, 0, 2);
+
+            btnRemoveSelected = MakeButton("← 移除选中项", ColorGrayBg, ColorDarkText, 128, 30);
             btnRemoveSelected.Click += btnRemoveSelected_Click;
-            g.Controls.Add(btnRemoveSelected);
-
-            btnRemoveAll = new Button();
-            btnRemoveAll.Text = "全部移除";
-            btnRemoveAll.SetBounds(442, 170, 134, 30);
-            StyleButton(btnRemoveAll, Color.FromArgb(240, 240, 240), Color.FromArgb(50, 50, 50));
+            btnRowRight.Controls.Add(btnRemoveSelected);
+            btnRemoveAll = MakeButton("全部移除", ColorGrayBg, ColorDarkText, 100, 30);
             btnRemoveAll.Click += btnRemoveAll_Click;
-            g.Controls.Add(btnRemoveAll);
+            btnRowRight.Controls.Add(btnRemoveAll);
         }
 
-        private void BuildStatusBar()
+        // 双击左侧 = 添加进右键菜单；双击右侧 = 移除
+        private void lstAvailable_DoubleClick(object sender, EventArgs e)
         {
+            btnAddSelected_Click(sender, e);
+        }
+
+        private void lstAdded_DoubleClick(object sender, EventArgs e)
+        {
+            btnRemoveSelected_Click(sender, e);
+        }
+
+        private void lstAvailable_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            if (suppress) return;
+            SyncActionButtons();
+        }
+
+        private void lstAdded_SelectedIndexChanged(object sender, EventArgs e)
+        {
+            if (suppress) return;
+            SyncActionButtons();
+        }
+
+        // 按钮可用性跟随列表选择状态，替代"点下去才弹提示"
+        private void SyncActionButtons()
+        {
+            bool hasSel = lstAvailable.SelectedItems.Count > 0;
+            btnAddSelected.Enabled = hasSel;
+            btnTestSwitch.Enabled = hasSel;
+            btnDeleteCustom.Enabled = hasSel && (NvApi.Available || AmdApi.Available);
+            btnRemoveSelected.Enabled = lstAdded.SelectedItems.Count > 0;
+            btnRemoveAll.Enabled = lstAdded.Items.Count > 0;
+            btnCreateDriver.Enabled = NvApi.Available || AmdApi.Available;
+        }
+
+        private void BuildStatusBar(Control parent)
+        {
+            TableLayoutPanel bar = new TableLayoutPanel();
+            bar.Dock = DockStyle.Bottom;
+            bar.AutoSize = true;
+            bar.ColumnCount = 2;
+            bar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
+            bar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+            bar.Margin = new Padding(4, 0, 4, 0);
+            parent.Controls.Add(bar);
+
             lblStatus = new Label();
-            lblStatus.SetBounds(12, 618, 470, 18);
-            lblStatus.ForeColor = Color.Gray;
+            lblStatus.AutoSize = true;
+            lblStatus.Dock = DockStyle.Fill;
+            lblStatus.ForeColor = ColorGrey;
             lblStatus.Font = new Font("Microsoft YaHei UI", 8f);
-            Controls.Add(lblStatus);
+            bar.Controls.Add(lblStatus, 0, 0);
 
             Label lblVersion = new Label();
             lblVersion.Text = Version;
-            lblVersion.SetBounds(536, 618, 52, 18);
+            lblVersion.AutoSize = true;
             lblVersion.ForeColor = Color.LightGray;
-            lblVersion.TextAlign = ContentAlignment.MiddleRight;
             lblVersion.Font = new Font("Microsoft YaHei UI", 8f);
-            Controls.Add(lblVersion);
+            bar.Controls.Add(lblVersion, 1, 0);
         }
 
         // ---------- 数据加载 ----------
 
         private void MainForm_Load(object sender, EventArgs e)
         {
-            NvApi.Load(); // 提前探测，结果在 InitNvidiaPanel 中反映
+            NvApi.Load(); // 提前探测，结果在 InitEnhancePanel 中反映
+            AmdApi.Load();
+            try { RegistryManager.MigrateElevatedCommands(Application.ExecutablePath); } catch { }
             RefreshAll(false);
         }
 
@@ -324,9 +588,22 @@ namespace DisplaySwitcher
             LoadMonitors();
             RefreshAddedList();
             RefreshSavedStatus();
-            InitNvidiaPanel();
+            InitEnhancePanel();
+            SyncActionButtons();
 
-            if (feedback) ToastForm.Show(this, "已重新检测显示器与模式");
+            if (feedback) ShowRefreshSummary();
+        }
+
+        // 刷新检测同时重读右键菜单：自愈失效路径 + 报告项数与可见性
+        private void ShowRefreshSummary()
+        {
+            int repaired = 0;
+            try { repaired = RegistryManager.MigrateElevatedCommands(Application.ExecutablePath); } catch { }
+            int count = RegistryManager.ListEntries().Count;
+            string msg = "已重新检测显示器与模式；右键菜单共 " + count + " 项";
+            if (repaired > 0) msg += "（已自动修复 " + repaired + " 项失效路径）";
+            msg += IsWin11OrLater() ? "。Win11 请在右键桌面 → 显示更多选项 中查看" : "。右键桌面即可看到";
+            ToastForm.Show(this, msg);
         }
 
         private void cmbDevice_SelectedIndexChanged(object sender, EventArgs e)
@@ -334,7 +611,7 @@ namespace DisplaySwitcher
             if (suppress) return;
             LoadModes();
             RefreshAddedList();
-            InitNvidiaPanel();
+            InitEnhancePanel();
         }
 
         private void btnRefresh_Click(object sender, EventArgs e)
@@ -400,12 +677,11 @@ namespace DisplaySwitcher
             RefreshAvailableList(null);
         }
 
-        // 筛选项 = 「全部刷新率」+ 当前显示器实际支持频率去重降序（含自定义项频率）
+        // 筛选项 = 「全部刷新率」+ 当前显示器驱动枚举的频率去重降序
         private void RebuildFreqFilter()
         {
             List<int> freqs = new List<int>();
             CollectFreqs(nativeEntries, freqs);
-            CollectFreqs(customEntries, freqs);
             freqs.Sort();
             freqs.Reverse();
 
@@ -445,63 +721,198 @@ namespace DisplaySwitcher
                 lstAvailable.Items.Add(nativeEntries[i]);
                 if (select != null && select.Same(nativeEntries[i])) selectIdx = lstAvailable.Items.Count - 1;
             }
-            for (int i = 0; i < customEntries.Count; i++)
-            {
-                if (!FilterMatch(customEntries[i])) continue;
-                lstAvailable.Items.Add(customEntries[i]);
-                if (select != null && select.Same(customEntries[i])) selectIdx = lstAvailable.Items.Count - 1;
-            }
             if (selectIdx >= 0) lstAvailable.SelectedIndex = selectIdx;
         }
 
         // ---------- 自定义分辨率输入 ----------
 
-        private void btnAddToList_Click(object sender, EventArgs e)
+        // 读取并校验宽/高/刷新率输入，失败时已弹气泡提示
+        private bool TryReadCustomInput(out int w, out int h, out int f)
         {
-            int w, h, f;
+            w = 0; h = 0; f = 0;
             if (!int.TryParse(txtWidth.Text.Trim(), out w) || w < 640 || w > 7680)
             {
                 ToastForm.Show(this, "宽度须为 640-7680 的整数", true);
-                return;
+                return false;
             }
             if (!int.TryParse(txtHeight.Text.Trim(), out h) || h < 480 || h > 4320)
             {
                 ToastForm.Show(this, "高度须为 480-4320 的整数", true);
-                return;
+                return false;
             }
             if (!int.TryParse(txtRefresh.Text.Trim(), out f) || f < 24 || f > 500)
             {
                 ToastForm.Show(this, "刷新率须为 24-500 的整数", true);
+                return false;
+            }
+            return true;
+        }
+
+        // 一键创建自定义分辨率到驱动：按当前显示器的显卡自动路由
+        // （N 卡走 NVAPI 算时序+硬件试验+保存；A 卡走 ADL CustomizedMode 校验+添加），
+        // 成功后自动加入桌面右键菜单
+        private void btnCreateDriver_Click(object sender, EventArgs e)
+        {
+            int w, h, f;
+            if (!TryReadCustomInput(out w, out h, out f)) return;
+            DisplayInfo dev = SelectedDevice();
+            if (dev == null)
+            {
+                ToastForm.Show(this, "未检测到可用显示器", true);
                 return;
             }
 
-            ModeEntry me = new ModeEntry();
-            me.Width = w; me.Height = h; me.Freq = f; me.IsCustom = true;
-
-            // 已在列表（原生或自定义）则仅选中
-            for (int i = 0; i < nativeEntries.Count; i++)
-                if (nativeEntries[i].Same(me)) { RefreshAvailableList(nativeEntries[i]); ToastForm.Show(this, "该模式已在可选列表中"); return; }
-            for (int i = 0; i < customEntries.Count; i++)
-                if (customEntries[i].Same(me)) { RefreshAvailableList(customEntries[i]); ToastForm.Show(this, "该模式已在可选列表中"); return; }
-
-            // CDS_TEST 验证；失败不阻止添加（自定义分辨率常依赖 GPU 缩放，可能误拒）
-            DisplayInfo dev = SelectedDevice();
-            if (dev != null)
+            bool amd = IsAmdAdapter(dev.AdapterString);
+            if (amd && !AmdApi.Available)
             {
-                int r = DisplayManager.TestMode(dev.DeviceName, w, h, f);
-                if (r != NativeMethods.DISP_CHANGE_SUCCESSFUL)
-                    ToastForm.Show(this, "驱动报告该模式不受支持，仍已添加；切换时若失败会报错", true);
+                ToastForm.Show(this, "未检测到 AMD 显卡或驱动不支持（" + AmdApi.UnavailableReason + "）", true);
+                return;
+            }
+            if (!amd && !NvApi.Available)
+            {
+                ToastForm.Show(this, "未检测到 NVIDIA 显卡或驱动不支持（" + NvApi.UnavailableReason + "）", true);
+                return;
+            }
+
+            int r;
+            UseWaitCursor = true;
+            try
+            {
+                r = amd ? AmdApi.CreateCustomMode(w, h, f)
+                        : NvApi.CreateCustomMode(dev.DeviceName, w, h, f);
+            }
+            finally
+            {
+                UseWaitCursor = false;
+            }
+            if (r != 0)
+            {
+                ToastForm.Show(this, "创建失败：" + (amd ? AmdApi.ErrorString(r) : NvApi.ErrorString(r)) + "（" + r + "）", true);
+                return;
+            }
+
+            // 重新枚举模式，新模式出现在左侧可选列表并选中
+            LoadModes();
+            ModeEntry sel = new ModeEntry();
+            sel.Width = w; sel.Height = h; sel.Freq = f;
+            RefreshAvailableList(sel);
+
+            // 自动加入右键菜单，一步闭环
+            try
+            {
+                if (AddModeToMenu(dev, w, h, f))
+                {
+                    ToastForm.Show(this, "已创建到驱动并加入右键菜单：" + w + "x" + h + " @ " + f + "Hz"
+                        + (IsWin11OrLater() ? "。右键桌面 → 显示更多选项 中查看" : "。右键桌面即可看到"));
+                }
                 else
-                    ToastForm.Show(this, "已验证并加入可选列表：" + w + "x" + h + " @ " + f + "Hz");
+                {
+                    ToastForm.Show(this, "已创建到驱动：" + w + "x" + h + " @ " + f + "Hz（右键菜单中已存在）");
+                }
             }
-            else
+            catch (Exception ex)
             {
-                ToastForm.Show(this, "已加入可选列表（未检测到显示器，跳过验证）");
+                ToastForm.Show(this, "已创建到驱动，但添加右键菜单失败：" + ex.Message, true);
+            }
+        }
+
+        // 把单个模式写入 config + 注册表右键菜单（带读回校验）；已存在返回 false
+        private bool AddModeToMenu(DisplayInfo dev, int w, int h, int f)
+        {
+            if (AlreadyInMenu(w, h, f)) return false;
+            List<DisplayProfile> all = ConfigStore.LoadProfiles();
+            DisplayProfile p = new DisplayProfile();
+            p.id = Guid.NewGuid().ToString("N").Substring(0, 8);
+            p.deviceName = dev.DeviceName;
+            p.friendlyName = string.IsNullOrEmpty(dev.MonitorName) ? dev.AdapterString : dev.MonitorName;
+            p.width = w;
+            p.height = h;
+            p.refresh = f;
+            all.Add(p);
+            ConfigStore.SaveProfiles(all);
+            List<DisplayProfile> one = new List<DisplayProfile>();
+            one.Add(p);
+            RegistryManager.AddMenuEntries(one, Application.ExecutablePath);
+            RefreshAddedList();
+            RefreshSavedStatus();
+            return true;
+        }
+
+        // 从显卡驱动删除自定义分辨率（N 卡 NVAPI / A 卡 ADL 自动路由），
+        // 连带移除引用它的右键菜单项与配置
+        private void btnDeleteCustom_Click(object sender, EventArgs e)
+        {
+            DisplayInfo dev = SelectedDevice();
+            if (dev == null)
+            {
+                ToastForm.Show(this, "未检测到可用显示器", true);
+                return;
+            }
+            if (lstAvailable.SelectedItems.Count != 1)
+            {
+                ToastForm.Show(this, "请在左侧可选列表中选中一个要删除的模式", true);
+                return;
+            }
+            ModeEntry me = lstAvailable.SelectedItem as ModeEntry;
+            if (me == null) return;
+
+            bool amd = IsAmdAdapter(dev.AdapterString);
+            if (amd && !AmdApi.Available)
+            {
+                ToastForm.Show(this, "未检测到 AMD 显卡或驱动不支持（" + AmdApi.UnavailableReason + "）", true);
+                return;
+            }
+            if (!amd && !NvApi.Available)
+            {
+                ToastForm.Show(this, "未检测到 NVIDIA 显卡或驱动不支持（" + NvApi.UnavailableReason + "）", true);
+                return;
             }
 
-            customEntries.Add(me);
-            RebuildFreqFilter();
-            RefreshAvailableList(me);
+            DialogResult dr = MessageBox.Show(this,
+                "将从显卡驱动删除自定义分辨率 " + me.Width + "x" + me.Height + " @ " + me.Freq + "Hz，"
+                + "并连带移除引用它的右键菜单项与配置。\n\n确定？",
+                "删除自定义分辨率确认", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+            if (dr != DialogResult.Yes) return;
+
+            try
+            {
+                int r = amd ? AmdApi.DeleteCustomMode(me.Width, me.Height, me.Freq)
+                            : NvApi.DeleteCustomMode(dev.DeviceName, me.Width, me.Height, me.Freq);
+                if (r == -6) // NVAPI_NVIDIA_DEVICE_NOT_FOUND / ADL 未找到匹配项
+                {
+                    ToastForm.Show(this, "该模式不是驱动中的自定义分辨率，未删除", true);
+                    return;
+                }
+                if (r != 0)
+                {
+                    ToastForm.Show(this, "删除失败：" + (amd ? AmdApi.ErrorString(r) : NvApi.ErrorString(r)) + "（" + r + "）", true);
+                    return;
+                }
+
+                // 连带清理引用该模式的右键菜单项与配置
+                List<DisplayProfile> all = ConfigStore.LoadProfiles();
+                int cascaded = 0;
+                for (int i = all.Count - 1; i >= 0; i--)
+                {
+                    DisplayProfile p = all[i];
+                    if (!string.Equals(p.deviceName, dev.DeviceName, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (p.width != me.Width || p.height != me.Height || p.refresh != me.Freq) continue;
+                    RegistryManager.RemoveEntry(p.id);
+                    all.RemoveAt(i);
+                    cascaded++;
+                }
+                if (cascaded > 0) ConfigStore.SaveProfiles(all);
+
+                LoadModes();
+                RefreshAddedList();
+                RefreshSavedStatus();
+                ToastForm.Show(this, "已从驱动删除 " + me.Width + "x" + me.Height + " @ " + me.Freq + "Hz"
+                    + (cascaded > 0 ? "，连带移除右键菜单项 " + cascaded + " 个" : ""));
+            }
+            catch (Exception ex)
+            {
+                ToastForm.Show(this, "删除失败：" + ex.Message, true);
+            }
         }
 
         // ---------- 右侧已添加列表 / 注册表 ----------
@@ -586,40 +997,70 @@ namespace DisplaySwitcher
 
             try
             {
-                List<DisplayProfile> all = ConfigStore.LoadProfiles();
-                List<DisplayProfile> added = new List<DisplayProfile>();
-                int skipped = 0;
+                int added = 0, skipped = 0;
                 for (int i = 0; i < lstAvailable.SelectedItems.Count; i++)
                 {
                     ModeEntry me = lstAvailable.SelectedItems[i] as ModeEntry;
                     if (me == null) continue;
-                    // 判重：注册表 ∪ config 中同 宽x高x刷新率 已存在（无论新旧文案）则跳过
-                    if (AlreadyInMenu(me.Width, me.Height, me.Freq)) { skipped++; continue; }
-                    DisplayProfile p = new DisplayProfile();
-                    p.id = Guid.NewGuid().ToString("N").Substring(0, 8);
-                    p.deviceName = dev.DeviceName;
-                    p.friendlyName = string.IsNullOrEmpty(dev.MonitorName) ? dev.AdapterString : dev.MonitorName;
-                    p.width = me.Width;
-                    p.height = me.Height;
-                    p.refresh = me.Freq;
-                    all.Add(p);
-                    added.Add(p);
+                    if (AddModeToMenu(dev, me.Width, me.Height, me.Freq)) added++;
+                    else skipped++;
                 }
-                if (added.Count == 0)
+                if (added == 0)
                 {
                     ToastForm.Show(this, "所选模式已存在于右键菜单中（跳过 " + skipped + " 项）");
                     return;
                 }
-                ConfigStore.SaveProfiles(all);
-                RegistryManager.AddMenuEntries(added, Application.ExecutablePath);
-                ToastForm.Show(this, "已添加 " + added.Count + " 项到桌面右键菜单"
-                    + (skipped > 0 ? "，跳过已存在 " + skipped + " 项" : ""));
-                RefreshAddedList();
-                RefreshSavedStatus();
+                ToastForm.Show(this, "已添加 " + added + " 项到桌面右键菜单"
+                    + (skipped > 0 ? "，跳过已存在 " + skipped + " 项" : "")
+                    + (IsWin11OrLater() ? "。右键桌面 → 显示更多选项 中查看" : "。右键桌面即可看到"));
             }
             catch (Exception ex)
             {
                 ToastForm.Show(this, "添加失败：" + ex.Message, true);
+            }
+        }
+
+        // Win11 桌面右键默认只显示新版菜单，注册表经典项在「显示更多选项」中
+        private static bool IsWin11OrLater()
+        {
+            Version v = Environment.OSVersion.Version;
+            return v.Major > 10 || (v.Major == 10 && v.Build >= 22000);
+        }
+
+        // 真实切换选中的模式（CDS_TEST 对依赖 GPU 缩放的模式可能误拒，只有真切换才算数）
+        private void btnTestSwitch_Click(object sender, EventArgs e)
+        {
+            DisplayInfo dev = SelectedDevice();
+            if (dev == null)
+            {
+                ToastForm.Show(this, "未检测到可用显示器", true);
+                return;
+            }
+            ModeEntry me = lstAvailable.SelectedItem as ModeEntry;
+            if (me == null)
+            {
+                ToastForm.Show(this, "请先在左侧选择一个模式", true);
+                return;
+            }
+
+            UseWaitCursor = true;
+            int r;
+            try
+            {
+                r = DisplayManager.SetMode(dev.DeviceName, me.Width, me.Height, me.Freq);
+            }
+            finally
+            {
+                UseWaitCursor = false;
+            }
+            if (r == NativeMethods.DISP_CHANGE_SUCCESSFUL)
+            {
+                ToastForm.Show(this, "已切换到 " + me.Width + "x" + me.Height + " @ " + me.Freq + "Hz");
+                UpdateCurrentModeLabel();
+            }
+            else
+            {
+                ToastForm.Show(this, "切换失败：" + DisplayManager.ErrorText(r) + "（" + r + "）", true);
             }
         }
 
@@ -690,18 +1131,6 @@ namespace DisplaySwitcher
             }
         }
 
-        private static bool ProfileExists(List<DisplayProfile> saved, string deviceName, ModeEntry me)
-        {
-            for (int i = 0; i < saved.Count; i++)
-            {
-                DisplayProfile p = saved[i];
-                if (string.Equals(p.deviceName, deviceName, StringComparison.OrdinalIgnoreCase)
-                    && p.width == me.Width && p.height == me.Height && p.refresh == me.Freq)
-                    return true;
-            }
-            return false;
-        }
-
         private void RefreshSavedStatus()
         {
             List<DisplayProfile> saved;
@@ -710,7 +1139,7 @@ namespace DisplaySwitcher
 
             if (saved.Count == 0)
             {
-                lblStatus.Text = "尚未保存任何配置";
+                lblStatus.Text = "① 左侧选分辨率 → ②【→ 添加选中项】进右键菜单 → ③ 桌面右键即可切换";
                 return;
             }
             System.Text.StringBuilder sb = new System.Text.StringBuilder();
@@ -808,51 +1237,180 @@ namespace DisplaySwitcher
             }
         }
 
-        // ---------- NVIDIA 显示增强 ----------
+        // ---------- 显示增强（NVIDIA / AMD 双面板） ----------
 
-        private void InitNvidiaPanel()
+        private const int VendorNv = 0;
+        private const int VendorAmd = 1;
+
+        private static bool IsAmdAdapter(string adapterString)
         {
-            bool ok = NvApi.Available;
-            cmbScaling.Enabled = ok;
-            trkVibrance.Enabled = ok;
-            btnApplyNvidia.Enabled = ok;
+            return !string.IsNullOrEmpty(adapterString)
+                && (adapterString.IndexOf("AMD", StringComparison.OrdinalIgnoreCase) >= 0
+                    || adapterString.IndexOf("Radeon", StringComparison.OrdinalIgnoreCase) >= 0);
+        }
 
-            if (!ok)
+        private void InitEnhancePanel()
+        {
+            bool nvOk = NvApi.Available;
+            bool amdOk = AmdApi.Available;
+
+            if (!nvOk && !amdOk)
             {
-                lblNvHint.Text = "未检测到 NVIDIA 显卡或驱动不支持（" + NvApi.UnavailableReason + "）";
+                StyleVendorButton(btnVendorNv, false, false);
+                StyleVendorButton(btnVendorAmd, false, false);
+                cmbScaling.Enabled = false;
+                trkVibrance.Enabled = false;
+                btnApplyEnhance.Enabled = false;
+                lblEnhHint.Text = "未检测到 NVIDIA/AMD 显卡或驱动不支持";
+                SyncActionButtons();
                 return;
             }
-            lblNvHint.Text = "设置即时生效，仅作用于当前选中的显示器；直调失败时才会请求管理员授权";
 
-            DisplayInfo dev = SelectedDevice();
-            if (dev == null) return;
-
-            // 实时读取当前值初始化；失败时回退到 config.json 中保存的值
-            NvidiaSettings saved = null;
-            try { saved = ConfigStore.LoadNvidiaSettings(); } catch { saved = new NvidiaSettings(); }
-
-            int scaling;
-            if (NvApi.GetScaling(dev.DeviceName, out scaling) != NvApi.NVAPI_OK)
-                scaling = saved.scalingMode;
-            SelectScaling(scaling);
-
-            int cur, min, max, def;
-            if (NvApi.GetVibrance(dev.DeviceName, out cur, out min, out max, out def) == NvApi.NVAPI_OK)
+            // 未手动切换过时，默认厂商跟随当前显示器所属的卡
+            if (!vendorTouched)
             {
-                if (min >= 0 && max > min && max <= 100)
-                {
-                    trkVibrance.Minimum = min;
-                    trkVibrance.Maximum = max;
-                }
-                if (cur < trkVibrance.Minimum) cur = trkVibrance.Minimum;
-                if (cur > trkVibrance.Maximum) cur = trkVibrance.Maximum;
-                trkVibrance.Value = cur;
+                DisplayInfo dev = SelectedDevice();
+                if (dev != null && IsAmdAdapter(dev.AdapterString) && amdOk) currentVendor = VendorAmd;
+                else if (nvOk) currentVendor = VendorNv;
+                else currentVendor = VendorAmd;
             }
-            else if (saved.digitalVibrance >= 0)
+            if (currentVendor == VendorAmd && !amdOk) currentVendor = VendorNv;
+            if (currentVendor == VendorNv && !nvOk) currentVendor = VendorAmd;
+            SetVendor(currentVendor);
+            SyncActionButtons();
+        }
+
+        private void SetVendor(int vendor)
+        {
+            currentVendor = vendor;
+            bool amd = vendor == VendorAmd;
+            StyleVendorButton(btnVendorNv, !amd, NvApi.Available);
+            StyleVendorButton(btnVendorAmd, amd, AmdApi.Available);
+            lblVibrance.Text = amd ? "饱和度：" : "数字振动：";
+            btnApplyEnhance.Text = amd ? "应用 AMD 设置" : "应用 NVIDIA 设置";
+            LoadVendorValues();
+        }
+
+        private void btnVendorNv_Click(object sender, EventArgs e)
+        {
+            if (!NvApi.Available)
             {
-                trkVibrance.Value = Math.Min(trkVibrance.Maximum, Math.Max(trkVibrance.Minimum, saved.digitalVibrance));
+                ToastForm.Show(this, "未检测到 NVIDIA 显卡或驱动不支持（" + NvApi.UnavailableReason + "）", true);
+                return;
+            }
+            vendorTouched = true;
+            SetVendor(VendorNv);
+        }
+
+        private void btnVendorAmd_Click(object sender, EventArgs e)
+        {
+            if (!AmdApi.Available)
+            {
+                ToastForm.Show(this, "未检测到 AMD 显卡或驱动不支持（" + AmdApi.UnavailableReason + "）", true);
+                return;
+            }
+            vendorTouched = true;
+            SetVendor(VendorAmd);
+        }
+
+        private void LoadVendorValues()
+        {
+            bool amd = currentVendor == VendorAmd;
+            bool ok = amd ? AmdApi.Available : NvApi.Available;
+            cmbScaling.Enabled = ok;
+            trkVibrance.Enabled = ok;
+            btnApplyEnhance.Enabled = ok;
+
+            if (!amd)
+            {
+                // NVIDIA：作用于上方当前选中的显示器
+                if (!ok)
+                {
+                    lblEnhHint.Text = "未检测到 NVIDIA 显卡或驱动不支持（" + NvApi.UnavailableReason + "）";
+                    return;
+                }
+                lblEnhHint.Text = "设置即时生效，仅作用于当前选中的显示器；直调失败时才会请求管理员授权";
+                DisplayInfo dev = SelectedDevice();
+                if (dev == null) return;
+
+                // 实时读取当前值初始化；失败时回退到 config.json 中保存的值
+                NvidiaSettings saved = null;
+                try { saved = ConfigStore.LoadNvidiaSettings(); } catch { saved = new NvidiaSettings(); }
+
+                int scaling;
+                if (NvApi.GetScaling(dev.DeviceName, out scaling) != NvApi.NVAPI_OK)
+                    scaling = saved.scalingMode;
+                SelectScaling(scaling);
+
+                trkVibrance.Minimum = 0;
+                trkVibrance.Maximum = 100;
+                int cur, min, max, def;
+                if (NvApi.GetVibrance(dev.DeviceName, out cur, out min, out max, out def) == NvApi.NVAPI_OK)
+                {
+                    if (min >= 0 && max > min && max <= 100)
+                    {
+                        trkVibrance.Minimum = min;
+                        trkVibrance.Maximum = max;
+                    }
+                    trkVibrance.Value = Clamp(cur, trkVibrance.Minimum, trkVibrance.Maximum);
+                }
+                else if (saved.digitalVibrance >= 0)
+                {
+                    trkVibrance.Value = Clamp(saved.digitalVibrance, trkVibrance.Minimum, trkVibrance.Maximum);
+                }
+                lblVibranceVal.Text = trkVibrance.Value.ToString();
+                return;
+            }
+
+            // AMD：自动作用于 AMD 卡上第一个已连接显示器
+            if (!ok)
+            {
+                lblEnhHint.Text = "未检测到 AMD 显卡或驱动不支持（" + AmdApi.UnavailableReason + "）";
+                return;
+            }
+            int amdAdapter, amdDisplay;
+            string amdName;
+            int fr = AmdApi.FindDisplay(out amdAdapter, out amdDisplay, out amdName);
+            if (fr != AmdApi.ADL_OK)
+            {
+                cmbScaling.Enabled = false;
+                trkVibrance.Enabled = false;
+                btnApplyEnhance.Enabled = false;
+                lblEnhHint.Text = "未找到已连接的 AMD 显示器（" + AmdApi.ErrorString(fr) + "）";
+                return;
+            }
+            lblEnhHint.Text = "作用于：" + amdName + "（AMD 第一个已连接显示器）；设置即时生效，无需管理员";
+
+            AmdSettings savedAmd = null;
+            try { savedAmd = ConfigStore.LoadAmdSettings(); } catch { savedAmd = new AmdSettings(); }
+
+            int amdScaling;
+            if (AmdApi.GetScaling(out amdScaling) != AmdApi.ADL_OK)
+                amdScaling = savedAmd.scalingMode;
+            SelectScaling(amdScaling);
+
+            trkVibrance.Minimum = 0;
+            trkVibrance.Maximum = 200;
+            int sat, satMin, satMax, satDef;
+            if (AmdApi.GetSaturation(out sat, out satMin, out satMax, out satDef) == AmdApi.ADL_OK)
+            {
+                if (satMin >= 0 && satMax > satMin)
+                {
+                    trkVibrance.Minimum = satMin;
+                    trkVibrance.Maximum = satMax;
+                }
+                trkVibrance.Value = Clamp(sat, trkVibrance.Minimum, trkVibrance.Maximum);
+            }
+            else if (savedAmd.saturation >= 0)
+            {
+                trkVibrance.Value = Clamp(savedAmd.saturation, trkVibrance.Minimum, trkVibrance.Maximum);
             }
             lblVibranceVal.Text = trkVibrance.Value.ToString();
+        }
+
+        private static int Clamp(int v, int min, int max)
+        {
+            return v < min ? min : (v > max ? max : v);
         }
 
         private void SelectScaling(int scaling)
@@ -876,7 +1434,49 @@ namespace DisplaySwitcher
             lblVibranceVal.Text = trkVibrance.Value.ToString();
         }
 
-        private void btnApplyNvidia_Click(object sender, EventArgs e)
+        private void btnApplyEnhance_Click(object sender, EventArgs e)
+        {
+            if (currentVendor == VendorAmd) { ApplyAmd(); return; }
+            ApplyNvidia();
+        }
+
+        // AMD：ADL 直调（无需管理员），成功才写配置
+        private void ApplyAmd()
+        {
+            int scaling = ((ScalingOption)cmbScaling.SelectedItem).Value;
+            int saturation = trkVibrance.Value;
+
+            UseWaitCursor = true;
+            try
+            {
+                int rs = AmdApi.SetScaling(scaling);
+                int rv = AmdApi.SetSaturation(saturation);
+                if (rs == AmdApi.ADL_OK && rv == AmdApi.ADL_OK)
+                {
+                    try
+                    {
+                        AmdSettings s = new AmdSettings();
+                        s.scalingMode = scaling;
+                        s.saturation = saturation;
+                        ConfigStore.SaveAmdSettings(s);
+                    }
+                    catch { }
+                    ToastForm.Show(this, "AMD 设置已应用（缩放 + 饱和度 " + saturation + "）");
+                }
+                else
+                {
+                    ToastForm.Show(this,
+                        (rs != AmdApi.ADL_OK ? "缩放设置失败：" + AmdApi.ErrorString(rs) + "；" : "")
+                        + (rv != AmdApi.ADL_OK ? "饱和度设置失败：" + AmdApi.ErrorString(rv) : ""), true);
+                }
+            }
+            finally
+            {
+                UseWaitCursor = false;
+            }
+        }
+
+        private void ApplyNvidia()
         {
             DisplayInfo dev = SelectedDevice();
             if (dev == null)
@@ -988,7 +1588,6 @@ namespace DisplaySwitcher
             public int Width;
             public int Height;
             public int Freq;
-            public bool IsCustom;
 
             public bool Same(ModeEntry other)
             {
@@ -997,7 +1596,7 @@ namespace DisplaySwitcher
 
             public override string ToString()
             {
-                return (IsCustom ? "[自定义] " : "") + Width + "x" + Height + " @ " + Freq + "Hz";
+                return Width + "x" + Height + " @ " + Freq + "Hz";
             }
         }
 
@@ -1036,128 +1635,6 @@ namespace DisplaySwitcher
             public override string ToString()
             {
                 return Text;
-            }
-        }
-
-        // 操作反馈气泡：无边框、圆角、半透明、置顶，自动淡出
-        private sealed class ToastForm : Form
-        {
-            private static ToastForm current;
-
-            private readonly string message;
-            private Timer timer;
-            private int phase; // 0 淡入 / 1 停留 / 2 淡出
-            private int holdTicks;
-
-            public static void Show(Form owner, string msg)
-            {
-                Show(owner, msg, false);
-            }
-
-            public static void Show(Form owner, string msg, bool error)
-            {
-                if (current != null)
-                {
-                    try { current.Close(); } catch { }
-                    current = null;
-                }
-                ToastForm t = new ToastForm(msg, error);
-                current = t;
-                int x, y;
-                if (owner != null)
-                {
-                    x = owner.Left + owner.Width - t.Width - 16;
-                    y = owner.Top + owner.Height - t.Height - 48;
-                }
-                else
-                {
-                    Rectangle wa = Screen.PrimaryScreen.WorkingArea;
-                    x = wa.Right - t.Width - 16;
-                    y = wa.Bottom - t.Height - 16;
-                }
-                t.Location = new Point(x, y);
-                t.Show(owner);
-            }
-
-            private ToastForm(string msg, bool error)
-            {
-                message = msg;
-                FormBorderStyle = FormBorderStyle.None;
-                StartPosition = FormStartPosition.Manual;
-                ShowInTaskbar = false;
-                TopMost = true;
-                Font = new Font("Microsoft YaHei UI", 9f);
-
-                Size textSize = TextRenderer.MeasureText(msg, Font, new Size(400, 0), TextFormatFlags.WordBreak);
-                Width = Math.Max(180, textSize.Width + 44);
-                Height = Math.Max(40, textSize.Height + 24);
-                BackColor = error ? ColorDanger : Color.FromArgb(45, 45, 48);
-                Opacity = 0;
-
-                using (GraphicsPath path = RoundedRect(new Rectangle(0, 0, Width, Height), 10))
-                {
-                    Region = new Region(path);
-                }
-
-                timer = new Timer();
-                timer.Interval = 40;
-                timer.Tick += timer_Tick;
-                holdTicks = 55; // 停留约 2.2 秒
-            }
-
-            private static GraphicsPath RoundedRect(Rectangle r, int radius)
-            {
-                int d = radius * 2;
-                GraphicsPath path = new GraphicsPath();
-                path.AddArc(r.X, r.Y, d, d, 180, 90);
-                path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
-                path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
-                path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
-                path.CloseFigure();
-                return path;
-            }
-
-            protected override void OnShown(EventArgs e)
-            {
-                base.OnShown(e);
-                timer.Start();
-            }
-
-            protected override void OnFormClosed(FormClosedEventArgs e)
-            {
-                timer.Stop();
-                if (current == this) current = null;
-                base.OnFormClosed(e);
-            }
-
-            private void timer_Tick(object sender, EventArgs e)
-            {
-                if (phase == 0)
-                {
-                    Opacity += 0.18;
-                    if (Opacity >= 0.94) { Opacity = 0.94; phase = 1; }
-                }
-                else if (phase == 1)
-                {
-                    holdTicks--;
-                    if (holdTicks <= 0) phase = 2;
-                }
-                else
-                {
-                    Opacity -= 0.12;
-                    if (Opacity <= 0.02)
-                    {
-                        timer.Stop();
-                        Close();
-                    }
-                }
-            }
-
-            protected override void OnPaint(PaintEventArgs e)
-            {
-                TextRenderer.DrawText(e.Graphics, message, Font,
-                    new Rectangle(14, 6, Width - 28, Height - 12), Color.White,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.WordBreak);
             }
         }
     }

@@ -43,6 +43,7 @@ namespace DisplaySwitcher
             if (parsed.profiles != null) root.profiles = parsed.profiles;
             if (parsed.disabledMonitors != null) root.disabledMonitors = parsed.disabledMonitors;
             if (parsed.nvidiaSettings != null) root.nvidiaSettings = parsed.nvidiaSettings;
+            if (parsed.amdSettings != null) root.amdSettings = parsed.amdSettings;
             return root;
         }
 
@@ -75,6 +76,19 @@ namespace DisplaySwitcher
         {
             ConfigRoot root = LoadRoot();
             root.nvidiaSettings = settings;
+            SaveRoot(root);
+        }
+
+        public static AmdSettings LoadAmdSettings()
+        {
+            ConfigRoot root = LoadRoot();
+            return root.amdSettings ?? new AmdSettings();
+        }
+
+        public static void SaveAmdSettings(AmdSettings settings)
+        {
+            ConfigRoot root = LoadRoot();
+            root.amdSettings = settings;
             SaveRoot(root);
         }
 

@@ -19,20 +19,90 @@ namespace DisplaySwitcher
                 key.SetValue("Icon", exePath);
                 using (RegistryKey cmd = key.CreateSubKey("command"))
                 {
-                    cmd.SetValue("", "\"" + exePath + "\" --switch \"" + profile.id + "\" --elevated");
+                    // 切换分辨率是当前用户设置，无需管理员权限，不带 --elevated
+                    cmd.SetValue("", "\"" + exePath + "\" --switch \"" + profile.id + "\"");
                 }
             }
+        }
+
+        // 启动时自愈菜单项：旧命令带 --elevated 或 EXE 路径已变动时重写 command，
+        // 并把 Icon 同步为当前 EXE 路径。返回修正的条目数。
+        public static int MigrateElevatedCommands(string exePath)
+        {
+            int migrated = 0;
+            using (RegistryKey shell = Registry.CurrentUser.OpenSubKey(RootPath, true))
+            {
+                if (shell == null) return 0;
+                string[] names = shell.GetSubKeyNames();
+                for (int i = 0; i < names.Length; i++)
+                {
+                    if (!names[i].StartsWith(KeyPrefix, StringComparison.OrdinalIgnoreCase)) continue;
+                    using (RegistryKey key = shell.OpenSubKey(names[i], true))
+                    {
+                        if (key == null) continue;
+                        string id = names[i].Substring(KeyPrefix.Length);
+                        string expected = "\"" + exePath + "\" --switch \"" + id + "\"";
+                        bool fixedItem = false;
+                        using (RegistryKey cmd = key.OpenSubKey("command", true))
+                        {
+                            if (cmd != null)
+                            {
+                                string command = cmd.GetValue("") as string;
+                                if (command != expected)
+                                {
+                                    cmd.SetValue("", expected);
+                                    fixedItem = true;
+                                }
+                            }
+                        }
+                        string icon = key.GetValue("Icon") as string;
+                        if (icon != exePath)
+                        {
+                            key.SetValue("Icon", exePath);
+                            fixedItem = true;
+                        }
+                        if (fixedItem) migrated++;
+                    }
+                }
+            }
+            return migrated;
         }
 
         public static int AddMenuEntries(List<DisplayProfile> profiles, string exePath)
         {
             int added = 0;
-            for (int i = 0; i < profiles.Count; i++)
+            try
             {
-                AddMenuEntry(profiles[i], exePath);
-                added++;
+                for (int i = 0; i < profiles.Count; i++)
+                {
+                    AddMenuEntry(profiles[i], exePath);
+                    VerifyEntry(profiles[i].id);
+                    added++;
+                }
+            }
+            catch
+            {
+                // 回滚本次已写入的项，避免残留半成品菜单
+                for (int i = 0; i < added; i++) RemoveEntry(profiles[i].id);
+                throw;
             }
             return added;
+        }
+
+        // 写入后立即读回校验：确认注册表项和命令真实存在（防安全软件静默拦截）
+        private static void VerifyEntry(string id)
+        {
+            using (RegistryKey key = Registry.CurrentUser.OpenSubKey(RootPath + "\\" + KeyPrefix + id, false))
+            {
+                if (key == null)
+                    throw new InvalidOperationException("注册表写入后读回失败，可能被安全软件拦截");
+                using (RegistryKey cmd = key.OpenSubKey("command", false))
+                {
+                    string command = cmd != null ? cmd.GetValue("") as string : null;
+                    if (string.IsNullOrEmpty(command) || command.IndexOf(id, StringComparison.OrdinalIgnoreCase) < 0)
+                        throw new InvalidOperationException("注册表命令读回校验失败，可能被安全软件拦截");
+                }
+            }
         }
 
         // 删除单个菜单项（不存在时静默忽略）

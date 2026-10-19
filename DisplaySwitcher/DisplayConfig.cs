@@ -30,12 +30,14 @@ namespace DisplaySwitcher
         public List<DisplayProfile> profiles { get; set; }
         public List<string> disabledMonitors { get; set; }
         public NvidiaSettings nvidiaSettings { get; set; }
+        public AmdSettings amdSettings { get; set; }
 
         public ConfigRoot()
         {
             profiles = new List<DisplayProfile>();
             disabledMonitors = new List<string>();
             nvidiaSettings = null;
+            amdSettings = null;
         }
     }
 
@@ -49,6 +51,19 @@ namespace DisplaySwitcher
         {
             scalingMode = 0;
             digitalVibrance = -1;
+        }
+    }
+
+    // AMD 显示增强设置（缺失时读默认值，向后兼容）
+    public class AmdSettings
+    {
+        public int scalingMode { get; set; }   // 逻辑码：0=未设置 1=全屏 6=纵横比
+        public int saturation { get; set; }    // -1=未设置
+
+        public AmdSettings()
+        {
+            scalingMode = 0;
+            saturation = -1;
         }
     }
 

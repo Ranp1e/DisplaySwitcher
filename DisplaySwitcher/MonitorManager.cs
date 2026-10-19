@@ -10,24 +10,25 @@ namespace DisplaySwitcher
         public string InstanceId;    // 设备实例 ID，形如 MONITOR\AOC2702\4&xxxx
         public string FriendlyName;
         public bool IsEnabled;
+        public bool StatusKnown = true; // CM_Get_DevNode_Status 读取失败时为 false
 
         public override string ToString()
         {
+            if (!StatusKnown) return FriendlyName + "（状态未知）";
             return FriendlyName + (IsEnabled ? "（已启用）" : "（已禁用）");
         }
     }
 
     // 监视器设备（PNP）枚举与禁用/启用。已禁用的监视器不会出现
     // 在 EnumDisplayDevices 里，所以数据源用 SetupDi 枚举（含禁用项）。
+    // DIGCF_PRESENT 只列当前实际存在的设备，过滤历史上插过又拔掉的幽灵监视器。
     internal static class MonitorManager
     {
         public static List<MonitorDevice> GetMonitors()
         {
             List<MonitorDevice> result = new List<MonitorDevice>();
             Guid classGuid = NativeMethods.GUID_DEVCLASS_MONITOR;
-            // flags=0：枚举该类下所有设备（含已禁用）；DIGCF_PRESENT 会保留禁用设备，
-            // 但为稳妥起见不用它过滤
-            IntPtr set = NativeMethods.SetupDiGetClassDevs(ref classGuid, IntPtr.Zero, IntPtr.Zero, 0);
+            IntPtr set = NativeMethods.SetupDiGetClassDevs(ref classGuid, IntPtr.Zero, IntPtr.Zero, NativeMethods.DIGCF_PRESENT);
             if (set == IntPtr.Zero || set == new IntPtr(-1)) return result;
             try
             {
@@ -57,7 +58,11 @@ namespace DisplaySwitcher
                     if (NativeMethods.CM_Get_DevNode_Status(out status, out problem, data.DevInst, 0) == NativeMethods.CR_SUCCESS)
                         dev.IsEnabled = !((status & NativeMethods.DN_HAS_PROBLEM) != 0 && problem == NativeMethods.CM_PROB_DISABLED);
                     else
-                        dev.IsEnabled = true;
+                    {
+                        // 状态读不出来时标未知，不瞎报已启用
+                        dev.StatusKnown = false;
+                        dev.IsEnabled = true; // 计数时按启用算，避免误删最后一台
+                    }
 
                     result.Add(dev);
                 }

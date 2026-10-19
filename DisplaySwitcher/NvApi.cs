@@ -24,6 +24,12 @@ namespace DisplaySwitcher
         private const uint ID_SET_DISPLAY_CONFIG = 0x5D8CF8DE;
         private const uint ID_GET_DVC_INFO_EX = 0x0E45002D;
         private const uint ID_SET_DVC_LEVEL_EX = 0x4A82C2B1;
+        private const uint ID_ENUM_CUSTOM_DISPLAY = 0xA2072D59;
+        private const uint ID_TRY_CUSTOM_DISPLAY = 0x1F7DB630;
+        private const uint ID_SAVE_CUSTOM_DISPLAY = 0x49882876;
+        private const uint ID_DELETE_CUSTOM_DISPLAY = 0x552E5B9B;
+        private const uint ID_REVERT_CUSTOM_TRIAL = 0xCBBD40F0;
+        private const uint ID_GET_TIMING = 0x175167E9;
 
         public const int NVAPI_OK = 0;
         public const int NVAPI_ERROR = -1;
@@ -70,6 +76,18 @@ namespace DisplaySwitcher
         private delegate int GetDisplayConfigDelegate(ref uint pathInfoCount, IntPtr pathInfo);
         [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
         private delegate int SetDisplayConfigDelegate(uint pathInfoCount, IntPtr pathInfo, uint flags);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int EnumCustomDisplayDelegate(uint displayId, uint index, IntPtr custDisp);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int TryCustomDisplayDelegate(IntPtr displayIds, uint count, IntPtr custDisp);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int SaveCustomDisplayDelegate(IntPtr displayIds, uint count, uint outputIdOnly, uint monitorIdOnly);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int DeleteCustomDisplayDelegate(IntPtr displayIds, uint count, IntPtr custDisp);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int RevertCustomTrialDelegate(IntPtr displayIds, uint count);
+        [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+        private delegate int GetTimingDelegate(uint displayId, IntPtr timingInput, IntPtr timingOut);
 
         [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         private static extern IntPtr LoadLibrary(string lpFileName);
@@ -99,6 +117,12 @@ namespace DisplaySwitcher
         private static SetDVCLevelExDelegate setDvcLevelEx;
         private static GetDisplayConfigDelegate getDisplayConfig;
         private static SetDisplayConfigDelegate setDisplayConfig;
+        private static EnumCustomDisplayDelegate enumCustomDisplay;
+        private static TryCustomDisplayDelegate tryCustomDisplay;
+        private static SaveCustomDisplayDelegate saveCustomDisplay;
+        private static DeleteCustomDisplayDelegate deleteCustomDisplay;
+        private static RevertCustomTrialDelegate revertCustomTrial;
+        private static GetTimingDelegate getTiming;
 
         public static bool Load()
         {
@@ -122,6 +146,7 @@ namespace DisplaySwitcher
             QueryInterfaceDelegate query =
                 (QueryInterfaceDelegate)Marshal.GetDelegateForFunctionPointer(qi, typeof(QueryInterfaceDelegate));
 
+
             InitializeDelegate initialize =
                 (InitializeDelegate)Resolve(query, ID_INITIALIZE, "NvAPI_Initialize", typeof(InitializeDelegate));
             unload = (UnloadDelegate)Resolve(query, ID_UNLOAD, "NvAPI_Unload", typeof(UnloadDelegate));
@@ -134,6 +159,12 @@ namespace DisplaySwitcher
             setDvcLevelEx = (SetDVCLevelExDelegate)Resolve(query, ID_SET_DVC_LEVEL_EX, "NvAPI_SetDVCLevelEx", typeof(SetDVCLevelExDelegate));
             getDisplayConfig = (GetDisplayConfigDelegate)Resolve(query, ID_GET_DISPLAY_CONFIG, "NvAPI_DISP_GetDisplayConfig", typeof(GetDisplayConfigDelegate));
             setDisplayConfig = (SetDisplayConfigDelegate)Resolve(query, ID_SET_DISPLAY_CONFIG, "NvAPI_DISP_SetDisplayConfig", typeof(SetDisplayConfigDelegate));
+            enumCustomDisplay = (EnumCustomDisplayDelegate)Resolve(query, ID_ENUM_CUSTOM_DISPLAY, "NvAPI_DISP_EnumCustomDisplay", typeof(EnumCustomDisplayDelegate));
+            tryCustomDisplay = (TryCustomDisplayDelegate)Resolve(query, ID_TRY_CUSTOM_DISPLAY, "NvAPI_DISP_TryCustomDisplay", typeof(TryCustomDisplayDelegate));
+            saveCustomDisplay = (SaveCustomDisplayDelegate)Resolve(query, ID_SAVE_CUSTOM_DISPLAY, "NvAPI_DISP_SaveCustomDisplay", typeof(SaveCustomDisplayDelegate));
+            deleteCustomDisplay = (DeleteCustomDisplayDelegate)Resolve(query, ID_DELETE_CUSTOM_DISPLAY, "NvAPI_DISP_DeleteCustomDisplay", typeof(DeleteCustomDisplayDelegate));
+            revertCustomTrial = (RevertCustomTrialDelegate)Resolve(query, ID_REVERT_CUSTOM_TRIAL, "NvAPI_DISP_RevertCustomDisplayTrial", typeof(RevertCustomTrialDelegate));
+            getTiming = (GetTimingDelegate)Resolve(query, ID_GET_TIMING, "NvAPI_DISP_GetTiming", typeof(GetTimingDelegate));
 
             if (initialize == null || enumDisplayHandle == null || getDisplayIdByName == null
                 || getDisplayConfig == null || setDisplayConfig == null)
@@ -340,6 +371,218 @@ namespace DisplaySwitcher
                 return NVAPI_ERROR;
             }
         }
+
+        // ---------- 自定义分辨率（NvAPI_DISP_Try/Save/Delete/EnumCustomDisplay） ----------
+        // NV_CUSTOM_DISPLAY 固定 144 字节（纯 u32/u16/u8/float，x86/x64 布局一致）。
+        // 偏移：version 0, width 4, height 8, depth 12, colorFormat 16,
+        // srcPartition(x,y,w,h float) 20-32, xRatio 36, yRatio 40,
+        // timing(NV_TIMING 96 字节) 44, hwModeSetOnly 140。
+        // NV_TIMING 内偏移：HVisible+0 HBorder+2 HFrontPorch+4 HSyncWidth+6 HTotal+8 HSyncPol+10
+        // VVisible+12 VBorder+14 VFrontPorch+16 VSyncWidth+18 VTotal+20 VSyncPol+22
+        // interlaced+24 pclk(10kHz)+28 etc.flag+32 etc.rr+36 etc.rrx1k+40 etc.aspect+44 etc.rep+48
+        private const int CUSTOM_DISPLAY_SIZE = 144;
+        private const int T_OFF = 44; // timing 起始偏移
+
+        public class CustomModeInfo
+        {
+            public int Width;
+            public int Height;
+            public int Refresh;      // etc.rr
+            public int Depth;
+            public int HFrontPorch, HSyncWidth, HTotal, HSyncPol;
+            public int VFrontPorch, VSyncWidth, VTotal, VSyncPol;
+            public int Interlaced;
+            public uint Pclk10kHz;
+        }
+
+        private static int DisplayIdFromName(string displayName, out uint displayId)
+        {
+            displayId = 0;
+            if (getDisplayIdByName == null) return -1;
+            return getDisplayIdByName(displayName, out displayId);
+        }
+
+        // 枚举驱动中已保存的自定义分辨率（NVCP「自定义」列表的内容）
+        public static int EnumCustomDisplays(string displayName, List<CustomModeInfo> list)
+        {
+            if (enumCustomDisplay == null) return -1;
+            uint displayId;
+            int r = DisplayIdFromName(displayName, out displayId);
+            if (r != NVAPI_OK) return r;
+
+            IntPtr buf = Marshal.AllocHGlobal(CUSTOM_DISPLAY_SIZE);
+            try
+            {
+                uint index = 0;
+                while (true)
+                {
+                    ZeroFill(buf, CUSTOM_DISPLAY_SIZE);
+                    Marshal.WriteInt32(buf, 0, CUSTOM_DISPLAY_SIZE | (1 << 16)); // NV_CUSTOM_DISPLAY_VER
+                    r = enumCustomDisplay(displayId, index, buf);
+                    if (r == NVAPI_END_ENUMERATION) break;
+                    if (r != NVAPI_OK) return r;
+                    CustomModeInfo m = new CustomModeInfo();
+                    m.Width = Marshal.ReadInt32(buf, 4);
+                    m.Height = Marshal.ReadInt32(buf, 8);
+                    m.Depth = Marshal.ReadInt32(buf, 12);
+                    m.HFrontPorch = Marshal.ReadInt16(buf, T_OFF + 4);
+                    m.HSyncWidth = Marshal.ReadInt16(buf, T_OFF + 6);
+                    m.HTotal = Marshal.ReadInt16(buf, T_OFF + 8);
+                    m.HSyncPol = Marshal.ReadByte(buf, T_OFF + 10);
+                    m.VFrontPorch = Marshal.ReadInt16(buf, T_OFF + 16);
+                    m.VSyncWidth = Marshal.ReadInt16(buf, T_OFF + 18);
+                    m.VTotal = Marshal.ReadInt16(buf, T_OFF + 20);
+                    m.VSyncPol = Marshal.ReadByte(buf, T_OFF + 22);
+                    m.Interlaced = Marshal.ReadInt16(buf, T_OFF + 24);
+                    m.Pclk10kHz = (uint)Marshal.ReadInt32(buf, T_OFF + 28);
+                    m.Refresh = Marshal.ReadInt16(buf, T_OFF + 36);
+                    if (m.Refresh <= 0)
+                    {
+                        int rrx1k = Marshal.ReadInt32(buf, T_OFF + 40);
+                        m.Refresh = (rrx1k + 500) / 1000;
+                    }
+                    list.Add(m);
+                    index++;
+                }
+                return NVAPI_OK;
+            }
+            finally { Marshal.FreeHGlobal(buf); }
+        }
+
+        // 构造 NV_CUSTOM_DISPLAY 头部缓冲区（调用方负责 FreeHGlobal）；
+        // timing 段（T_OFF 起 96 字节）由 FillAutoTiming 填驱动计算值。
+        private static IntPtr BuildCustomDisplay(int w, int h)
+        {
+            IntPtr buf = Marshal.AllocHGlobal(CUSTOM_DISPLAY_SIZE);
+            ZeroFill(buf, CUSTOM_DISPLAY_SIZE);
+            Marshal.WriteInt32(buf, 0, CUSTOM_DISPLAY_SIZE | (1 << 16));
+            Marshal.WriteInt32(buf, 4, w);
+            Marshal.WriteInt32(buf, 8, h);
+            Marshal.WriteInt32(buf, 12, 32);  // depth 32bpp
+            Marshal.WriteInt32(buf, 16, 0);   // colorFormat = NV_FORMAT_UNKNOWN（驱动自选）
+            WriteFloat(buf, 20, 0f);          // srcPartition = (0,0,1,1)
+            WriteFloat(buf, 24, 0f);
+            WriteFloat(buf, 28, 1f);
+            WriteFloat(buf, 32, 1f);
+            WriteFloat(buf, 36, 1f);          // xRatio/yRatio = 1（不缩放）
+            WriteFloat(buf, 40, 1f);
+            return buf;
+        }
+
+        private static void WriteFloat(IntPtr buf, int offset, float value)
+        {
+            Marshal.WriteInt32(buf, offset, BitConverter.ToInt32(BitConverter.GetBytes(value), 0));
+        }
+
+        // 用驱动自己的公式算时序（NVCP「自动」同款，NV_TIMING_OVERRIDE_AUTO=1，
+        // 失败回退 CVT-RB=6），直接写入 cd 缓冲区的 timing 段。
+        // NV_TIMING_INPUT 实测 32 字节（驱动期望尺寸，24 会报 -9）：
+        // version 0, width 4, height 8, rr(float) 12, flag 16, type 20, 其余保留
+        private const int TIMING_INPUT_SIZE = 32;
+        private static int FillAutoTiming(uint displayId, int w, int h, int refresh, IntPtr cd)
+        {
+            if (getTiming == null) return -1;
+            IntPtr input = Marshal.AllocHGlobal(TIMING_INPUT_SIZE);
+            try
+            {
+                ZeroFill(input, TIMING_INPUT_SIZE);
+                Marshal.WriteInt32(input, 0, TIMING_INPUT_SIZE | (1 << 16)); // NV_TIMING_INPUT_VER
+                Marshal.WriteInt32(input, 4, w);
+                Marshal.WriteInt32(input, 8, h);
+                WriteFloat(input, 12, (float)refresh);
+                Marshal.WriteInt32(input, 16, 0); // flag：逐行、无缩放
+                Marshal.WriteInt32(input, 20, 1); // NV_TIMING_OVERRIDE_AUTO
+                IntPtr timingOut = new IntPtr(cd.ToInt64() + T_OFF);
+                int r = getTiming(displayId, input, timingOut);
+                if (r != NVAPI_OK)
+                {
+                    Marshal.WriteInt32(input, 20, 6); // NV_TIMING_OVERRIDE_CVT_RB
+                    r = getTiming(displayId, input, timingOut);
+                }
+                return r;
+            }
+            finally { Marshal.FreeHGlobal(input); }
+        }
+
+        // 完整创建流程：算时序 → 硬件真实试验（屏幕会闪烁）→ 保存进驱动 → 恢复桌面原模式。
+        // 任何一步失败都会尽量恢复原模式并返回 NvAPI 错误码。
+        [System.Runtime.ExceptionServices.HandleProcessCorruptedStateExceptions]
+        public static int CreateCustomMode(string displayName, int w, int h, int refresh)
+        {
+            try
+            {
+                if (tryCustomDisplay == null || saveCustomDisplay == null) return -1;
+                uint displayId;
+                int r = DisplayIdFromName(displayName, out displayId);
+                if (r != NVAPI_OK) return r;
+
+                IntPtr ids = Marshal.AllocHGlobal(4);
+                IntPtr cd = BuildCustomDisplay(w, h);
+                try
+                {
+                    Marshal.WriteInt32(ids, 0, (int)displayId);
+                    r = FillAutoTiming(displayId, w, h, refresh, cd);
+                    Log("FillAutoTiming -> " + r);
+                    if (r != NVAPI_OK) return r;
+                    r = tryCustomDisplay(ids, 1, cd);
+                    Log("TryCustomDisplay -> " + r);
+                    if (r != NVAPI_OK) return r; // 试验失败，硬件未切换，无需恢复
+                    r = saveCustomDisplay(ids, 1, 0, 0);
+                    Log("SaveCustomDisplay -> " + r);
+                    int saveResult = r;
+                    if (revertCustomTrial != null) revertCustomTrial(ids, 1); // 恢复桌面原模式
+                    return saveResult;
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(ids);
+                    Marshal.FreeHGlobal(cd);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("CreateCustomMode 异常: " + ex.GetType().Name + ": " + ex.Message);
+                return NVAPI_ERROR;
+            }
+        }
+
+        // 删除驱动中已保存的自定义分辨率（需与保存时的时序完全匹配，先枚举取回原始参数）
+        public static int DeleteCustomMode(string displayName, int w, int h, int refresh)
+        {
+            if (deleteCustomDisplay == null || enumCustomDisplay == null) return -1;
+            uint displayId;
+            int r = DisplayIdFromName(displayName, out displayId);
+            if (r != NVAPI_OK) return r;
+
+            IntPtr ids = Marshal.AllocHGlobal(4);
+            IntPtr cd = Marshal.AllocHGlobal(CUSTOM_DISPLAY_SIZE);
+            try
+            {
+                Marshal.WriteInt32(ids, 0, (int)displayId);
+                uint index = 0;
+                while (true)
+                {
+                    ZeroFill(cd, CUSTOM_DISPLAY_SIZE);
+                    Marshal.WriteInt32(cd, 0, CUSTOM_DISPLAY_SIZE | (1 << 16));
+                    r = enumCustomDisplay(displayId, index, cd);
+                    if (r == NVAPI_END_ENUMERATION) return NVAPI_NVIDIA_DEVICE_NOT_FOUND;
+                    if (r != NVAPI_OK) return r;
+                    int cw = Marshal.ReadInt32(cd, 4);
+                    int ch = Marshal.ReadInt32(cd, 8);
+                    int cr = Marshal.ReadInt16(cd, T_OFF + 36);
+                    if (cr <= 0) cr = (Marshal.ReadInt32(cd, T_OFF + 40) + 500) / 1000;
+                    if (cw == w && ch == h && cr == refresh)
+                        return deleteCustomDisplay(ids, 1, cd);
+                    index++;
+                }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(ids);
+                Marshal.FreeHGlobal(cd);
+            }
+        }
+
 
         // NV_DISPLAYCONFIG_PATH_INFO_V2 指针式结构的原始缓冲区。
         // x64: path=48, target=24；x86: path=28, target=12；details 固定 128。

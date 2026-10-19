@@ -26,6 +26,7 @@ namespace DisplaySwitcher
 
             // winexe 默认没有控制台，附加到父控制台以便输出
             AttachParentConsole();
+            InitCmdLog();
             try
             {
                 // 按需提权：带 --elevated 且当前不是管理员时，用 runas 重启自身（去掉 --elevated）
@@ -78,6 +79,36 @@ namespace DisplaySwitcher
                     return DoNvidiaApply(display, scaling, vibrance);
                 }
                 if (cmd == "--nvidia-probe") return DoNvidiaProbe();
+                if (cmd == "--nvidia-enum-custom")
+                {
+                    if (args.Length < 2) { Out("用法: DisplaySwitcher.exe --nvidia-enum-custom \"\\\\.\\DISPLAYx\""); return 1; }
+                    return DoNvidiaEnumCustom(args[1]);
+                }
+                if (cmd == "--nvidia-create-custom")
+                {
+                    int w2, h2, rr2;
+                    if (args.Length < 5 || !int.TryParse(args[2], out w2) || !int.TryParse(args[3], out h2) || !int.TryParse(args[4], out rr2))
+                    { Out("用法: DisplaySwitcher.exe --nvidia-create-custom \"\\\\.\\DISPLAYx\" 宽 高 刷新率"); return 1; }
+                    return DoNvidiaCreateCustom(args[1], w2, h2, rr2);
+                }
+                if (cmd == "--nvidia-delete-custom")
+                {
+                    int w3, h3, rr3;
+                    if (args.Length < 5 || !int.TryParse(args[2], out w3) || !int.TryParse(args[3], out h3) || !int.TryParse(args[4], out rr3))
+                    { Out("用法: DisplaySwitcher.exe --nvidia-delete-custom \"\\\\.\\DISPLAYx\" 宽 高 刷新率"); return 1; }
+                    return DoNvidiaDeleteCustom(args[1], w3, h3, rr3);
+                }
+                if (cmd == "--amd-probe") return DoAmdProbe();
+                if (cmd == "--amd-apply")
+                {
+                    int scaling = -1, saturation = -1, tmp;
+                    for (int i = 1; i + 1 < args.Length; i++)
+                    {
+                        if (args[i] == "--scaling" && int.TryParse(args[i + 1], out tmp)) { scaling = tmp; i++; }
+                        else if (args[i] == "--saturation" && int.TryParse(args[i + 1], out tmp)) { saturation = tmp; i++; }
+                    }
+                    return DoAmdApply(scaling, saturation);
+                }
                 if (cmd == "--cleanup-registry") return DoCleanupRegistry();
 
                 Out("未知参数。用法：");
@@ -89,6 +120,11 @@ namespace DisplaySwitcher
                 Out("  DisplaySwitcher.exe --enable-monitor \"实例ID\" [--elevated]");
                 Out("  DisplaySwitcher.exe --nvidia-apply --display \"\\\\.\\DISPLAYx\" --scaling N --vibrance NN");
                 Out("  DisplaySwitcher.exe --nvidia-probe                          NVAPI 只读诊断");
+                Out("  DisplaySwitcher.exe --nvidia-enum-custom \"\\\\.\\DISPLAYx\"  列出驱动中的自定义分辨率");
+                Out("  DisplaySwitcher.exe --nvidia-create-custom \"\\\\.\\DISPLAYx\" 宽 高 刷新率");
+                Out("  DisplaySwitcher.exe --nvidia-delete-custom \"\\\\.\\DISPLAYx\" 宽 高 刷新率");
+                Out("  DisplaySwitcher.exe --amd-probe                             ADL 只读诊断");
+                Out("  DisplaySwitcher.exe --amd-apply --scaling N --saturation NN 应用 AMD 设置");
                 Out("  DisplaySwitcher.exe --cleanup-registry                      右键菜单去重清理");
                 return 1;
             }
@@ -147,12 +183,12 @@ namespace DisplaySwitcher
             }
             catch (Exception ex)
             {
-                Out("读取 config.json 失败：" + ex.Message);
+                Fail("读取 config.json 失败：" + ex.Message);
                 return 2;
             }
             if (cfg == null)
             {
-                Out("config.json 中找不到配置 ID：" + id);
+                Fail("config.json 中找不到配置 ID：" + id);
                 return 2;
             }
 
@@ -162,23 +198,23 @@ namespace DisplaySwitcher
                 string alt = DisplayManager.FindDeviceByFriendlyName(cfg.friendlyName);
                 if (alt == null)
                 {
-                    Out("显示器 " + device + " 当前不存在，且无法按友好名匹配。");
+                    Fail("显示器 " + device + " 当前不存在，且无法按友好名匹配。");
                     return 2;
                 }
-                Out("设备名 " + device + " 已失效，按友好名匹配到 " + alt);
+                Log("设备名 " + device + " 已失效，按友好名匹配到 " + alt);
                 device = alt;
             }
 
             int r = DisplayManager.SetMode(device, cfg.width, cfg.height, cfg.refresh);
             if (r == NativeMethods.DISP_CHANGE_SUCCESSFUL)
             {
-                Out("切换成功：" + device + " -> " + cfg.width + "x" + cfg.height + " @" + cfg.refresh + "Hz");
+                Succeed("切换成功：" + device + " -> " + cfg.width + "x" + cfg.height + " @" + cfg.refresh + "Hz");
                 return 0;
             }
             if (r == NativeMethods.DISP_CHANGE_BADMODE)
-                Out("切换失败：该分辨率/刷新率不受支持（CDS_TEST 未通过）。");
+                Fail("切换失败：该分辨率/刷新率不受支持（CDS_TEST 未通过）。");
             else
-                Out("切换失败，错误码 " + r + "（" + DisplayManager.ErrorText(r) + "）");
+                Fail("切换失败，错误码 " + r + "（" + DisplayManager.ErrorText(r) + "）");
             return 3;
         }
 
@@ -187,19 +223,19 @@ namespace DisplaySwitcher
             int w, h, f;
             if (!int.TryParse(sw, out w) || !int.TryParse(sh, out h) || !int.TryParse(sf, out f))
             {
-                Out("宽/高/刷新率必须是整数。");
+                Fail("宽/高/刷新率必须是整数。");
                 return 1;
             }
             int r = DisplayManager.SetMode(device, w, h, f);
             if (r == NativeMethods.DISP_CHANGE_SUCCESSFUL)
             {
-                Out("切换成功：" + device + " -> " + w + "x" + h + " @" + f + "Hz");
+                Succeed("切换成功：" + device + " -> " + w + "x" + h + " @" + f + "Hz");
                 return 0;
             }
             if (r == NativeMethods.DISP_CHANGE_BADMODE)
-                Out("切换失败：该分辨率/刷新率不受支持（CDS_TEST 未通过）。");
+                Fail("切换失败：该分辨率/刷新率不受支持（CDS_TEST 未通过）。");
             else
-                Out("切换失败，错误码 " + r + "（" + DisplayManager.ErrorText(r) + "）");
+                Fail("切换失败，错误码 " + r + "（" + DisplayManager.ErrorText(r) + "）");
             return 3;
         }
 
@@ -324,6 +360,115 @@ namespace DisplaySwitcher
             }
             NvApi.Unload();
             return 0;
+        }
+
+        // 列出驱动中已保存的自定义分辨率及完整时序（诊断 NVCP「自动」时序规律用）
+        private static int DoNvidiaEnumCustom(string displayName)
+        {
+            if (!NvApi.Load())
+            {
+                Out("NVAPI 不可用：" + NvApi.UnavailableReason);
+                return 4;
+            }
+            List<NvApi.CustomModeInfo> list = new List<NvApi.CustomModeInfo>();
+            int r = NvApi.EnumCustomDisplays(displayName, list);
+            if (r != NvApi.NVAPI_OK)
+            {
+                Out("枚举失败: " + NvApi.ErrorString(r) + "（" + r + "）");
+                NvApi.Unload();
+                return 4;
+            }
+            Out(displayName + " 驱动中已保存的自定义分辨率（共 " + list.Count + " 项）：");
+            for (int i = 0; i < list.Count; i++)
+            {
+                NvApi.CustomModeInfo m = list[i];
+                Out("[" + i + "] " + m.Width + "x" + m.Height + " @" + m.Refresh + "Hz depth=" + m.Depth
+                    + " pclk=" + (m.Pclk10kHz / 100.0).ToString("F3") + "MHz"
+                    + (m.Interlaced != 0 ? " 隔行" : " 逐行"));
+                Out("    H: total=" + m.HTotal + " fp=" + m.HFrontPorch + " sw=" + m.HSyncWidth
+                    + " bp=" + (m.HTotal - m.Width - m.HFrontPorch - m.HSyncWidth) + " pol=" + (m.HSyncPol == 0 ? "+" : "-"));
+                Out("    V: total=" + m.VTotal + " fp=" + m.VFrontPorch + " sw=" + m.VSyncWidth
+                    + " bp=" + (m.VTotal - m.Height - m.VFrontPorch - m.VSyncWidth) + " pol=" + (m.VSyncPol == 0 ? "+" : "-"));
+            }
+            NvApi.Unload();
+            return 0;
+        }
+
+        // 创建自定义分辨率（驱动算时序 → 硬件试验 → 保存 → 恢复原模式）
+        private static int DoNvidiaCreateCustom(string displayName, int w, int h, int refresh)
+        {
+            if (!NvApi.Load())
+            {
+                Out("NVAPI 不可用：" + NvApi.UnavailableReason);
+                return 4;
+            }
+            NvApi.DebugLog = true;
+            Out("创建 " + displayName + " " + w + "x" + h + " @" + refresh + "Hz（屏幕可能闪烁）...");
+            int r = NvApi.CreateCustomMode(displayName, w, h, refresh);
+            Out(r == NvApi.NVAPI_OK
+                ? "创建成功并已保存到驱动"
+                : "创建失败: " + NvApi.ErrorString(r) + "（" + r + "）");
+            NvApi.Unload();
+            return r == NvApi.NVAPI_OK ? 0 : 4;
+        }
+
+        // 删除驱动中已保存的自定义分辨率
+        private static int DoNvidiaDeleteCustom(string displayName, int w, int h, int refresh)
+        {
+            if (!NvApi.Load())
+            {
+                Out("NVAPI 不可用：" + NvApi.UnavailableReason);
+                return 4;
+            }
+            int r = NvApi.DeleteCustomMode(displayName, w, h, refresh);
+            Out(r == NvApi.NVAPI_OK
+                ? "已删除 " + w + "x" + h + " @" + refresh + "Hz"
+                : "删除失败: " + NvApi.ErrorString(r) + "（" + r + "）");
+            NvApi.Unload();
+            return r == NvApi.NVAPI_OK ? 0 : 4;
+        }
+
+        // ADL 只读诊断
+        private static int DoAmdProbe()
+        {
+            if (!AmdApi.Load())
+            {
+                Out("ADL 不可用：" + AmdApi.UnavailableReason);
+                return 4;
+            }
+            Out("atiadlxx.dll 加载成功，ADL 上下文创建 OK");
+            List<string> lines = new List<string>();
+            AmdApi.ProbeDisplays(lines);
+            for (int i = 0; i < lines.Count; i++) Out(lines[i]);
+            AmdApi.Unload();
+            return 0;
+        }
+
+        // 应用 AMD 显示增强（作用于 AMD 卡上第一个已连接显示器）
+        private static int DoAmdApply(int scaling, int saturation)
+        {
+            if (!AmdApi.Load())
+            {
+                Out("ADL 不可用：" + AmdApi.UnavailableReason);
+                return 4;
+            }
+            int exitCode = 0;
+            if (scaling >= 0)
+            {
+                int r = AmdApi.SetScaling(scaling);
+                Out(r == AmdApi.ADL_OK ? "缩放模式已设置为 " + scaling
+                    : "缩放设置失败：" + AmdApi.ErrorString(r) + "（" + r + "）");
+                if (r != AmdApi.ADL_OK) exitCode = 4;
+            }
+            if (saturation >= 0)
+            {
+                int r = AmdApi.SetSaturation(saturation);
+                Out(r == AmdApi.ADL_OK ? "饱和度已设置为 " + saturation
+                    : "饱和度设置失败：" + AmdApi.ErrorString(r) + "（" + r + "）");
+                if (r != AmdApi.ADL_OK) exitCode = 4;
+            }
+            AmdApi.Unload();
+            return exitCode;
         }
 
         private static string ScalingName(int scaling)
@@ -502,8 +647,63 @@ namespace DisplaySwitcher
             Console.WriteLine(s);
         }
 
+        // ---------- 结果反馈：控制台 + switch.log + 气泡 ----------
+
+        private static StreamWriter cmdLog;
+
+        // 日志写到 exe 同目录 switch.log；右键菜单启动时没有控制台，日志是唯一可回溯的记录
+        private static void InitCmdLog()
+        {
+            try
+            {
+                cmdLog = new StreamWriter(
+                    Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "switch.log"),
+                    true, Encoding.UTF8);
+            }
+            catch { cmdLog = null; }
+        }
+
+        private static void Log(string s)
+        {
+            Out(s);
+            try
+            {
+                if (cmdLog != null)
+                {
+                    cmdLog.WriteLine(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + s);
+                    cmdLog.Flush();
+                }
+            }
+            catch { }
+        }
+
+        private static void Succeed(string msg)
+        {
+            Log(msg);
+            Toast(msg, false);
+        }
+
+        private static void Fail(string msg)
+        {
+            Log(msg);
+            Toast(msg, true);
+        }
+
+        // 气泡自动关闭后消息循环退出；无法弹气泡时静默忽略
+        private static void Toast(string msg, bool error)
+        {
+            try
+            {
+                Application.EnableVisualStyles();
+                ToastForm t = ToastForm.Show(null, msg, error);
+                if (t != null) Application.Run(t);
+            }
+            catch { }
+        }
+
         private static void FinishConsole()
         {
+            try { if (cmdLog != null) { cmdLog.Close(); cmdLog = null; } } catch { }
             if (!consoleAttached) return;
             try
             {

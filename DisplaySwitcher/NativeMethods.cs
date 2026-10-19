@@ -264,18 +264,42 @@ namespace DisplaySwitcher
         // 仅测试模式是否被驱动接受（不应用）
         public static int TestMode(string deviceName, int width, int height, int frequency)
         {
-            NativeMethods.DEVMODE dm = new NativeMethods.DEVMODE();
-            dm.dmSize = (short)Marshal.SizeOf(typeof(NativeMethods.DEVMODE));
-            dm.dmPelsWidth = width;
-            dm.dmPelsHeight = height;
-            dm.dmDisplayFrequency = frequency;
-            dm.dmFields = NativeMethods.DM_PELSWIDTH | NativeMethods.DM_PELSHEIGHT | NativeMethods.DM_DISPLAYFREQUENCY;
-            return NativeMethods.ChangeDisplaySettingsEx(deviceName, ref dm, IntPtr.Zero,
-                NativeMethods.CDS_FULLSCREEN | NativeMethods.CDS_TEST, IntPtr.Zero);
+            NativeMethods.DEVMODE dm;
+            if (TryFindDriverMode(deviceName, width, height, frequency, out dm))
+            {
+                return NativeMethods.ChangeDisplaySettingsEx(deviceName, ref dm, IntPtr.Zero,
+                    NativeMethods.CDS_TEST, IntPtr.Zero);
+            }
+            // 驱动模式列表里没有（自定义分辨率）：手工构造 DEVMODE 兜底
+            NativeMethods.DEVMODE raw = BuildRawMode(width, height, frequency);
+            return NativeMethods.ChangeDisplaySettingsEx(deviceName, ref raw, IntPtr.Zero,
+                NativeMethods.CDS_TEST, IntPtr.Zero);
         }
 
-        // 先用 CDS_TEST 验证模式合法，再用 CDS_UPDATEREGISTRY 真正应用
+        // 先用 CDS_TEST 验证模式合法，再用 CDS_UPDATEREGISTRY 真正应用。
+        // 优先使用驱动枚举出的完整 DEVMODE（AMD 等驱动对手工构造的稀疏 DEVMODE 校验严格，
+        // 会拒绝位深为 0、刷新率 59/60 不完全相等等情况）；列表外的自定义分辨率走兜底路径。
         public static int SetMode(string deviceName, int width, int height, int frequency)
+        {
+            NativeMethods.DEVMODE dm;
+            if (TryFindDriverMode(deviceName, width, height, frequency, out dm))
+            {
+                int test = NativeMethods.ChangeDisplaySettingsEx(deviceName, ref dm, IntPtr.Zero,
+                    NativeMethods.CDS_TEST, IntPtr.Zero);
+                if (test != NativeMethods.DISP_CHANGE_SUCCESSFUL) return test;
+                return NativeMethods.ChangeDisplaySettingsEx(deviceName, ref dm, IntPtr.Zero,
+                    NativeMethods.CDS_UPDATEREGISTRY, IntPtr.Zero);
+            }
+
+            NativeMethods.DEVMODE raw = BuildRawMode(width, height, frequency);
+            int rawTest = NativeMethods.ChangeDisplaySettingsEx(deviceName, ref raw, IntPtr.Zero,
+                NativeMethods.CDS_TEST, IntPtr.Zero);
+            if (rawTest != NativeMethods.DISP_CHANGE_SUCCESSFUL) return rawTest;
+            return NativeMethods.ChangeDisplaySettingsEx(deviceName, ref raw, IntPtr.Zero,
+                NativeMethods.CDS_UPDATEREGISTRY, IntPtr.Zero);
+        }
+
+        private static NativeMethods.DEVMODE BuildRawMode(int width, int height, int frequency)
         {
             NativeMethods.DEVMODE dm = new NativeMethods.DEVMODE();
             dm.dmSize = (short)Marshal.SizeOf(typeof(NativeMethods.DEVMODE));
@@ -283,13 +307,34 @@ namespace DisplaySwitcher
             dm.dmPelsHeight = height;
             dm.dmDisplayFrequency = frequency;
             dm.dmFields = NativeMethods.DM_PELSWIDTH | NativeMethods.DM_PELSHEIGHT | NativeMethods.DM_DISPLAYFREQUENCY;
+            return dm;
+        }
 
-            int test = NativeMethods.ChangeDisplaySettingsEx(deviceName, ref dm, IntPtr.Zero,
-                NativeMethods.CDS_FULLSCREEN | NativeMethods.CDS_TEST, IntPtr.Zero);
-            if (test != NativeMethods.DISP_CHANGE_SUCCESSFUL) return test;
-
-            return NativeMethods.ChangeDisplaySettingsEx(deviceName, ref dm, IntPtr.Zero,
-                NativeMethods.CDS_UPDATEREGISTRY, IntPtr.Zero);
+        // 在驱动枚举的模式中找最佳匹配：宽高必须精确相等；刷新率允许 ±1 容差
+        // （驱动常把 60Hz 报成 59Hz、144Hz 报成 143Hz）；同分时优先与当前位深一致的模式。
+        private static bool TryFindDriverMode(string deviceName, int width, int height, int frequency,
+            out NativeMethods.DEVMODE best)
+        {
+            best = new NativeMethods.DEVMODE();
+            List<NativeMethods.DEVMODE> modes = GetModes(deviceName);
+            NativeMethods.DEVMODE cur = GetCurrentMode(deviceName);
+            int bestScore = int.MaxValue;
+            bool found = false;
+            for (int i = 0; i < modes.Count; i++)
+            {
+                NativeMethods.DEVMODE m = modes[i];
+                if (m.dmPelsWidth != width || m.dmPelsHeight != height) continue;
+                int freqDiff = Math.Abs(m.dmDisplayFrequency - frequency);
+                if (freqDiff > 1) continue;
+                int score = freqDiff * 4 + (m.dmBitsPerPel != cur.dmBitsPerPel ? 1 : 0);
+                if (score < bestScore)
+                {
+                    bestScore = score;
+                    best = m;
+                    found = true;
+                }
+            }
+            return found;
         }
 
         public static string ErrorText(int code)
